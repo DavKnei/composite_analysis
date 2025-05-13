@@ -29,7 +29,7 @@ Usage:
         --wt_csv_base ./csv/composite_ --region southern_alps \\
         --output_dir ./composite_output_surface_custom/ [--ncores 32] [--serial] [--debug]
 
-Author: David Kneidinger (updated by Gemini)
+Author: David Kneidinger
 Date: 2025-05-06
 """
 
@@ -472,6 +472,7 @@ def main():
     parser.add_argument("--time_offsets", type=str, default="-12,0,12",
                         help="Comma-separated list of time offsets in hours (e.g., -12,-6,0,6,12)")
     parser.add_argument("--debug", action="store_true", help="Enable DEBUG level logging.") # Added debug flag
+    parser.add_argument("--noMCS", action="store_true", help="False: composite of initMCS; True: composite of noMCS; Default=False")
     args = parser.parse_args()
 
     # --- Setup Logging ---
@@ -489,10 +490,17 @@ def main():
         level=logging.DEBUG,            # Minimum level to log (can be INFO, WARNING, etc.)
         format='%(asctime)s - %(levelname)s - %(message)s'  # Log format
     )
-
     variable_list = [args.data_var]
+    if args.noMCS:
+        weather_type_path = Path(f"{args.wt_csv_base}{args.region}_nomcs.csv")
+        base_col = 'datetime'
+        args_time_offsets = "0"
 
-    weather_type_path = Path(f"{args.wt_csv_base}{args.region}_mcs.csv")
+    else:
+        weather_type_path = Path(f"{args.wt_csv_base}{args.region}_mcs.csv")
+        base_col = 'time_0h'
+        args_time_offsets = args.time_offsets
+
     if not weather_type_path.exists():
         logging.error(f"Composite CSV file with weather types not found: {weather_type_path}")
         sys.exit(1)
@@ -532,7 +540,6 @@ def main():
         if clim_ds is not None: clim_ds.close()
         sys.exit(1)
 
-    base_col = 'time_0h'
 
     try:
         df_all = pd.read_csv(weather_type_path, parse_dates=[base_col])
@@ -576,7 +583,7 @@ def main():
 
     try:
         offset_col_names = create_offset_cols(df_filtered)
-        time_offsets = sorted([int(o) for o in args.time_offsets.split(',')])
+        time_offsets = sorted([int(o) for o in args_time_offsets.split(',')])
         missing_offsets = [off for off in time_offsets if off not in offset_col_names]
         if missing_offsets:
              logging.error(f"Requested time offsets {missing_offsets} not found in CSV columns: {list(offset_col_names.values())}")
@@ -689,7 +696,11 @@ def main():
         logging.error("Lat/lon info missing. Cannot save.");
         if clim_ds is not None: clim_ds.close(); sys.exit(1)
 
-    output_file_comp = args.output_dir / f"composite_surface_{args.region}_{args.data_var}_wt_clim_{args.period}.nc"
+    if args.noMCS:
+        output_file_comp = args.output_dir / f"composite_surface_{args.region}_{args.data_var}_wt_clim_{args.period}_nomcs.nc"
+    else:
+        output_file_comp = args.output_dir / f"composite_surface_{args.region}_{args.data_var}_wt_clim_{args.period}.nc"
+
     save_composites_to_netcdf_surface(results_wt, args.data_var, weather_types,
                                       months_to_process_for_output,
                                       time_offsets, lat, lon, output_file_comp,

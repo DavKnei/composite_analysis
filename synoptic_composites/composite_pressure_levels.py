@@ -586,6 +586,7 @@ def main():
     parser.add_argument("--time_offsets", type=str, default="-12,0,12",
                         help="Comma-separated list of time offsets in hours (e.g., -12,-6,0,6,12)")
     parser.add_argument("--debug", action="store_true", help="Enable DEBUG level logging.")
+    parser.add_argument("--noMCS", action="store_true", help="False: composite of initMCS; True: composite of noMCS; Default=False")
     args = parser.parse_args()
 
     # --- Setup Logging ---
@@ -609,10 +610,19 @@ def main():
     # Parse pressure levels from arguments
     levels = [int(l.strip()) for l in args.levels.split(',')]
 
-    # Construct path to the composite CSV file
-    comp_csv_file = Path(f"{args.comp_csv_base}{args.region}_mcs.csv")
-    if not comp_csv_file.exists():
-        logging.error(f"Composite CSV file not found: {comp_csv_file}"); sys.exit(1)
+    if args.noMCS:
+        # Construct path to the composite CSV file
+        comp_csv_file = Path(f"{args.comp_csv_base}{args.region}_nomcs.csv")
+        if not comp_csv_file.exists():
+            logging.error(f"Composite CSV file not found: {comp_csv_file}"); sys.exit(1)
+
+        args_time_offsets = "0"
+    else:
+        # Construct path to the composite CSV file
+        comp_csv_file = Path(f"{args.comp_csv_base}{args.region}_mcs.csv")
+        if not comp_csv_file.exists():
+            logging.error(f"Composite CSV file not found: {comp_csv_file}"); sys.exit(1)
+        args_time_offsets = args.time_offsets
 
     # --- Load and Prepare Climatology Data ---
     # Get details for the selected period
@@ -676,7 +686,11 @@ def main():
         for ds_item in datasets_to_merge: ds_item.close()
 
     # --- Load and Filter Event Data ---
-    base_col = 'time_0h' # Reference time column in CSV
+    if args.noMCS:
+        base_col = "datetime"
+
+    else:
+        base_col = 'time_0h' # Reference time column in CSV
     try:
         # Load the CSV file, parsing the base time column as dates
         df_all = pd.read_csv(comp_csv_file, parse_dates=[base_col])
@@ -727,7 +741,8 @@ def main():
     try:
         # Get column names corresponding to time offsets
         offset_col_names = create_offset_cols(df_filtered)
-        time_offsets = sorted([int(o) for o in args.time_offsets.split(',')])
+        time_offsets = sorted([int(o) for o in args_time_offsets.split(',')])
+       
         # Check if requested offsets exist in the CSV
         missing_offsets = [off for off in time_offsets if off not in offset_col_names]
         if missing_offsets:
@@ -862,7 +877,10 @@ def main():
         if clim_ds is not None: clim_ds.close(); sys.exit(1)
 
     # Define output filename including the period
-    output_file_comp = args.output_dir / f"composite_plev_{args.region}_wt_clim_{args.period}_parallel.nc"
+    if args.noMCS:
+        output_file_comp = args.output_dir / f"composite_plev_{args.region}_wt_clim_{args.period}_nomcs.nc"
+    else:
+        output_file_comp = args.output_dir / f"composite_plev_{args.region}_wt_clim_{args.period}.nc"
     # Save the final composite data to NetCDF
     save_composites_to_netcdf(results_wt, weather_types, months_to_process_for_output,
                               time_offsets, levels, lat, lon, output_file_comp,
