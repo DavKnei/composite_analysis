@@ -92,7 +92,7 @@ def main():
     parser.add_argument(
         "--output",
         type=str,
-        default="synoptic_composites/csv/composite_nomcs_",
+        default="synoptic_composites/csv/composite_",
         help="Output CSV file path for 'noMCS' times"
     )
     # Use parse_known_args to avoid errors if run in environments that add extra args (like some notebooks)
@@ -300,7 +300,7 @@ def main():
 
 
     # Use a specific datetime format for output consistency
-    output_df.to_csv(f"{args.output}{region_key}_mcs.csv", index=False, date_format='%Y-%m-%d %H:%M:%S')
+    output_df.to_csv(f"{args.output}{region_key}_nomcs.csv", index=False, date_format='%Y-%m-%d %H:%M:%S')
     print(f"Saved {len(output_df)} 'noMCS' times to {args.output}")
 
 if __name__ == "__main__":
