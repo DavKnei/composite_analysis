@@ -318,8 +318,9 @@ def main():
 
     # Processing loops
     for wt in weather_types:
-        logging.info(f"Processing WT {wt_val} ('{'All Events' if wt_val==0 else f'Type {wt_val}'}') - {len(df_wt_specific)} events (JJA, period-filtered)")
         df_wt = df_filtered if wt == 0 else df_filtered[df_filtered['wt'] == wt]
+        logging.info(f"Processing WT {wt} ('{'All Events' if wt==0 else f'Type {wt}'}') - {len(df_wt)} events (JJA, period-filtered)")
+
         if df_wt.empty:
             continue
         for off in time_offsets:
