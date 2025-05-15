@@ -245,7 +245,7 @@ def main():
     lat, lon = sample['lat'], sample['lon']
 
     suffix = '_nomcs' if args.noMCS else ''
-    out_file = args.output_dir / f"composite_surface_{args.region}_{args.data_var}_wt_clim_{args.period}{suffix}_cleaned.nc"
+    out_file = args.output_dir / f"composite_surface_{args.region}_{args.data_var}_wt_clim_{args.period}{suffix}.nc"
     save_composites(out_file, args.data_var, results, wts, TARGET_MONTHS, offs, lat, lon, period)
 
 if __name__ == '__main__':
