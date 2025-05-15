@@ -130,7 +130,7 @@ def main():
     parser.add_argument("--period",type=str,default="evaluation",choices=PERIODS.keys())
     parser.add_argument("--time_offsets", type=str, default="0",
                         help="Comma-separated list of time offsets to plot (default: 0)")
-    parser.add_argument("--output_prefix", type=str, default="./figures/plots_composite_nomcs_filtered/composite_",
+    parser.add_argument("--output_prefix", type=str, default="./figures/plots_composite_nomcs/composite_",
                         help="Output filename prefix")
     args = parser.parse_args()
 
@@ -140,7 +140,7 @@ def main():
 
     # Compose file paths
     comp_path_multi = os.path.join(args.base_dir,
-        args.comp_file_multidim + f"{args.region}_wt_clim_{args.period}_nomcs_filtered.nc")
+        args.comp_file_multidim + f"{args.region}_wt_clim_{args.period}_nomcs.nc")
     precip_comp_file = os.path.join(
         args.base_dir,
         args.precip_comp_file.format(region=args.region)
@@ -270,7 +270,7 @@ def main():
             fontsize=16
         )
 
-        out_file = f"{args.output_prefix}{args.region}_{month_label}_wt{weather_type}_nomcs_filtered.png"
+        out_file = f"{args.output_prefix}{args.region}_{month_label}_wt{weather_type}_nomcs.png"
         plt.savefig(out_file, dpi=150, bbox_inches="tight")
         print(f"Saved figure: {out_file}")
 
