@@ -65,15 +65,15 @@ def main():
     parser = argparse.ArgumentParser(
         description="Filter MCS initiation times for a specific subregion and produce a composite CSV file."
     )
-    parser.add_argument("--mcs_csv", type=str, default="./csv/mcs_initiation_dates_exp_GAR.csv",
+    parser.add_argument("--mcs_csv", type=str, default="synoptic_composites/csv/mcs_initiation_dates_exp_GAR.csv",
                         help="Input CSV file with MCS initiation times")
-    parser.add_argument("--weather_type_csv", type=str, default="./csv/weather_types_",
+    parser.add_argument("--weather_type_csv", type=str, default="./weather_typing/csv/GWT_Z500_",
                         help="Input CSV file with weather types")
     parser.add_argument("--region", type=str, required=True,
                         help="Subregion to consider (e.g., western_alps, southern_alps, dinaric_alps, eastern_alps)")
     parser.add_argument("--times", type=str, default="-12,-6,0,6,12",
                         help="Comma-separated list of time offsets in hours (e.g., -12,-6,0,6,12)")
-    parser.add_argument("--output_prefix", type=str, default="./csv/composite_",
+    parser.add_argument("--output_prefix", type=str, default="synoptic_composites/csv/composite_",
                         help="Prefix for output CSV files")
     args = parser.parse_args()
     
@@ -100,11 +100,11 @@ def main():
     mcs_region = create_offset_times(mcs_region, offset_hours)
     
     # Merge weather_type from the weather_types CSV.
-    # It is assumed that there is a file named "weather_types_{region_key}.csv" with at least columns: "date" and "weather_type"
-    weather_csv = f"{args.weather_type_csv}{region_key}_sorted.csv"
+    # It is assumed that there is a file named "{weather_types_csv}{region_key}.csv" with at least columns: "date" and "weather_type"
+    weather_csv = f"{args.weather_type_csv}{region_key}_ncl10.csv" 
     try:
         wt_df = pd.read_csv(weather_csv, parse_dates=['datetime'])
-        wt_df = wt_df[['datetime', 'lwt']]
+        wt_df = wt_df[['datetime', 'wt']]
         wt_df = wt_df.set_index('datetime')
         # Merge using the initiation time (time_0h) and the weather type date.
         mcs_region = mcs_region.set_index('datetime')
@@ -113,7 +113,7 @@ def main():
         print(f"Merged weather type data from {weather_csv}.")
     except Exception as e:
         print(f"Warning: Could not load weather types file {weather_csv} ({e}). Weather type column will be set to NaN.")
-        mcs_region['lwt'] = np.nan
+        mcs_region['wt'] = np.nan
 
     # Order time columns in increasing order
     time_cols = []
@@ -126,7 +126,7 @@ def main():
             time_cols.append(f"time_plus{off}h")
     
     # Include weather_type in the output columns.
-    required_cols = time_cols + ["center_lat", "center_lon", "track_number", "total_precip", "area", "lwt"]
+    required_cols = time_cols + ["center_lat", "center_lon", "track_number", "total_precip", "area", "wt"]
     mcs_out = mcs_region[required_cols].copy()
     mcs_out_filename = f"{args.output_prefix}{region_key}_mcs.csv"
     mcs_out.to_csv(mcs_out_filename, index=False)
