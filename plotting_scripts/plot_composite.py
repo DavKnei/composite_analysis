@@ -174,7 +174,7 @@ def main():
     parser.add_argument("--period",type=str,default="evaluation",choices=PERIODS.keys())
     parser.add_argument("--time_offsets", type=str, default="-12,0,12",
                         help="Comma-separated list of time offsets to plot (default: -12,0,12)")
-    parser.add_argument("--output_prefix", type=str, default="./figures/composite_",
+    parser.add_argument("--output_prefix", type=str, default="./figures/plots_composite/composite_",
                         help="Output filename prefix; full filename will be composite_{region}_{months}_wt{weather_type}.png")
     args = parser.parse_args()
     
@@ -285,7 +285,9 @@ def main():
         axs = axs.flatten()
         
         my_cmap = create_custom_cmap()
-        
+        theta_e_levels = np.arange(300, 340, 3)
+        theta_e_norm = mcolors.BoundaryNorm(theta_e_levels, ncolors=my_cmap.N, clip=False)
+
         # Build mapping from time_diff value to index.
         offset_dict = {int(val): np.where(time_diffs == val)[0][0] for val in time_diffs}
         desired_offsets = [-12, 0, 12]
@@ -306,7 +308,8 @@ def main():
                         SUBREGIONS[args.region],
                         title0,
                         "θe (K)",
-                        my_cmap)
+                        my_cmap,
+                        norm=theta_e_norm)
         # Panel 1: θe at 0h.
         idx = offset_dict[0]
         title1 = f"{args.pressure_level} hPa θe (0h), 500 hPa z overlay"
@@ -318,7 +321,8 @@ def main():
                         SUBREGIONS[args.region],
                         title1,
                         "θe (K)",
-                        my_cmap)
+                        my_cmap,
+                        norm=theta_e_norm)
         # Panel 2: θe at +12h.
         idx = offset_dict[12]
         title2 = f"{args.pressure_level} hPa θe (+12h), 500 hPa z overlay"
@@ -330,7 +334,8 @@ def main():
                         SUBREGIONS[args.region],
                         title2,
                         "θe (K)",
-                        my_cmap)
+                        my_cmap,
+                        norm=theta_e_norm)
         
         # Add a common horizontal colorbar below the top row for θe (smaller height).
         cbar_ax_top = fig.add_axes([0.1, 0.5, 0.5, 0.01])
@@ -347,7 +352,8 @@ def main():
         q_min = np.floor(np.min(q_all*1000))
         q_max = np.ceil(np.max(q_all*1000))
         delta_q = np.ceil((q_max - q_min)/ 11)
-        q_levels = np.arange(q_min, q_max, delta_q)
+        # q_levels = np.arange(q_min, q_max, delta_q)
+        q_levels = np.arange(1, 12, 2)
 
         q_norm = mcolors.BoundaryNorm(q_levels, ncolors=q_cmap.N, clip=False)
 
@@ -372,8 +378,9 @@ def main():
         max_prec = np.round(np.round(np.max(precip_all), 1) + 0.1, 1)
         min_prec = np.round(np.percentile(precip_all, 96), 1)
         delta_prec = np.round((max_prec-min_prec)/7, 1)
-        prec_levels_comp = np.arange(min_prec, max_prec, delta_prec)
-        prec_levels_comp = [round(x,1) for x in prec_levels_comp]  # weird rounding error otherwise
+        # prec_levels_comp = np.arange(min_prec, max_prec, delta_prec)
+        # prec_levels_comp = [round(x,1) for x in prec_levels_comp]  # weird rounding error otherwise
+        prec_levels_comp = np.arange(0.2, 5, 1)
         prec_norm = mcolors.BoundaryNorm(prec_levels_comp, ncolors=prec_cmap.N, clip=False)
         
         # Panel 4: Precipitation at -12h.
@@ -441,6 +448,7 @@ def main():
         t_max = np.ceil(np.max(t_celsius))
         delta_t = np.ceil((t_max - t_min)/ 11)
         t_levels = np.arange(t_min, t_max, delta_t)
+        t_levels = np.arange(3, 31, 3)
         
         t_norm = mcolors.BoundaryNorm(t_levels, ncolors=t_cmap.N, clip=False)
 
