@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
-""" Script to calculate MCS initiation times and no-MCS times from an MCS index CSV file. 
+""" Script to calculate MCS initiation times from an MCS index CSV file. 
 For each unique MCS (using cloudtracknumber_nomergesplit), 
 the script determines the initiation time (the earliest datetime) and saves these as mcs_initiation.csv. 
-Then it creates a complete half-hourly timeline (from the minimum to maximum initiation datetime).
-These are saved as no_mcs_times.csv.
 
 Usage: python calculate_mcs_times.py --input mcs_exp_GAR_index.csv
 
@@ -52,12 +50,6 @@ def main():
         type=str,
         default="./csv/mcs_initiation_dates_exp_GAR.csv",
         help="Output CSV file for MCS initiation times",
-    )
-    parser.add_argument(
-        "--freq",
-        type=str,
-        default="30min",
-        help="Frequency for complete timeline (e.g., '30min')",
     )
     args = parser.parse_args()
 
