@@ -203,7 +203,7 @@ def main():
 
     logging.basicConfig(level=logging.DEBUG if args.debug else logging.INFO,
                         format='%(asctime)s-%(levelname)s-%(funcName)s:%(lineno)d - %(message)s', force=True)
-    logging.info(f"--- Starting Composite Anomaly Plotting (2x2) --- Args: {args}")
+    logging.info(f"--- Starting Composite Anomaly Plotting --- Args: {args}")
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
     try:
@@ -330,7 +330,7 @@ def main():
             cbar_th = fig.colorbar(plot_handles[plot_key_th], cax=cax_theta_e, orientation='horizontal')
             cbar_th.set_label(f"Theta-e Anomaly ({ANOM_PLOT_CONFIG[plot_key_th]['unit']})", fontsize=9); cbar_th.ax.tick_params(labelsize=8)
         
-        plot_filename = args.output_dir / f"composite_anomalies_2x2_{args.region}_WT{wt}_{args.period}.png"
+        plot_filename = args.output_dir / f"composite_anomalies_{args.region}_WT{wt}_{args.period}.png"
         logging.info(f"  Saving plot: {plot_filename}")
         try: plt.savefig(plot_filename, dpi=150, bbox_inches='tight')
         except Exception as e_save: logging.error(f"Error saving plot {plot_filename}: {e_save}", exc_info=True)
