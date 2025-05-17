@@ -274,8 +274,8 @@ def main():
     warnings.filterwarnings("ignore", category=FutureWarning)
 
     period_info = PERIODS[args.period]
-    csv_suffix = "_nomcs.csv" if args.noMCS else "_mcs.csv"
-    csv_path = Path(f"{args.wt_csv_base}{args.region}{csv_suffix}")
+    suffix = "_nomcs" if args.noMCS else "_mcs"
+    csv_path = Path(f"{args.wt_csv_base}{args.region}{suffix}.csv")
     
     if not csv_path.exists():
         logging.error(f"FATAL: Event CSV file not found: {csv_path}")
@@ -463,7 +463,7 @@ def main():
              final_composite_means[f"{var_name}_mean"] = mean_da 
 
 
-    output_filename = args.output_dir / f"composite_single_level_{args.region}_{period_info['name']}{csv_suffix}"
+    output_filename = args.output_dir / f"composite_single_level_{args.region}_{period_info['name']}{suffix}.nc"
     
     # Ensure lat/lon values are available for saving
     if lat_coord_values is None or lon_coord_values is None or global_event_counts_accumulator is None:
