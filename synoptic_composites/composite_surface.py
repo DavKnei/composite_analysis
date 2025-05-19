@@ -223,7 +223,7 @@ def main():
             col = offset_cols[o]
             grp = subset.dropna(subset=[col])
             tasks = []
-            for (yr, m), g in grp.groupby([grp[col].dt.year, grp['month']]):
+            for (yr, m), g in grp.groupby([pd.to_datetime(grp[col]).dt.year, grp['month']]):
                 times = pd.DatetimeIndex(g[col].tolist())
                 if times.empty: continue
                 tasks.append((yr, m, times, args.data_dir, args.file_pattern, args.data_var, clim_ds))
