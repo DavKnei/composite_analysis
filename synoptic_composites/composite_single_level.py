@@ -20,6 +20,7 @@ from typing import List, Dict, Any, Optional
 # MetPy for dynamic calculations
 from metpy.calc import (
     potential_vorticity_baroclinic,
+    vorticity
     lat_lon_grid_deltas,
     potential_temperature,
     divergence as mp_divergence
@@ -38,7 +39,7 @@ PERIODS = {
 # Define the derived variables to be computed
 DERIVED_VARIABLES = [
     'jet_speed_250', 'div_250', 'pv_500',
-    'shear_250_850', 'mfc_850', 'conv_850'
+    'shear_500_850', 'mfc_850', 'conv_850'
 ]
 
 def get_era5_file(era5_dir: Path, year: int, month: int) -> Path:
@@ -159,32 +160,14 @@ def calculate_div_250(ds_events: xr.Dataset) -> xr.DataArray:
 
 def calculate_conv_850(ds_events: xr.Dataset) -> xr.DataArray:
     u850 = ds_events.u.sel(level=850)
-    v850 = ds_events.v.sel(level=850)
-    conv = (_calculate_divergence_base(u850, v850) * -1.0).drop_vars('level', errors='ignore')
-    conv.attrs.update({'units': 's-1', 'long_name': 'Convergence of horizontal wind at 850 hPa'})
-    return conv.rename("conv_850")
-
-def calculate_mfc_850(ds_events: xr.Dataset) -> xr.DataArray:
-    u850 = ds_events.u.sel(level=850)
-    v850 = ds_events.v.sel(level=850)
-    q850 = ds_events.q.sel(level=850) 
-    
-    uq850 = (u850 * q850).rename("uq850")
-    vq850 = (v850 * q850).rename("vq850")
-    
-    mfc = (_calculate_divergence_base(uq850, vq850) * -1.0).drop_vars('level', errors='ignore')
-    mfc.attrs.update({'units': 'kg kg-1 s-1', 'long_name': 'Moisture flux convergence at 850 hPa'})
-    return mfc.rename("mfc_850")
-
-def calculate_shear_250_850(ds_events: xr.Dataset) -> xr.DataArray:
-    u250 = ds_events.u.sel(level=250)
-    v250 = ds_events.v.sel(level=250)
+    u500 = ds_events.u.sel(level=500)
+    v500 = ds_events.v.sel(level=500)
     u850 = ds_events.u.sel(level=850)
     v850 = ds_events.v.sel(level=850)
     
-    shear = np.hypot(u250 - u850, v250 - v850)
-    shear.attrs.update({'units': 'm s-1', 'long_name': 'Magnitude of vector wind shear between 250 hPa and 850 hPa'})
-    return shear.rename("shear_250_850")
+    shear = np.hypot(u500 - u850, v500 - v850)
+    shear.attrs.update({'units': 'm s-1', 'long_name': 'Magnitude of vector wind shear between 500 hPa and 850 hPa'})
+    return shear.rename("shear_500_850")
 
 def calculate_pv_500(ds_events: xr.Dataset) -> xr.DataArray:
     ds_q = ds_events.metpy.quantify()
@@ -199,6 +182,12 @@ def calculate_pv_500(ds_events: xr.Dataset) -> xr.DataArray:
     pv_500hpa.attrs.update({'units': 'PVU', 'long_name': 'Potential Vorticity at 500 hPa'})
     return pv_500hpa.rename("pv_500")
 
+def calculate_rv_500(ds_events: xr.Dataset) -> xr.DataArray:
+    u500 = ds_events.u.sel(level=500)
+    v500 = ds_events.v.sel(level=500)
+    rel_vorticity = vorticity(u500, v500)
+    rel_vorticity.attrs.update({'units': 's-1', 'long_name': 'Relative Vorticity at 500 hPa'})
+    return rel_vorticity.rename("rel_vorticity_500")
 
 def calculate_all_derived_variables(ds_events: xr.Dataset) -> xr.Dataset:
     """Calculates all derived variables for the given event dataset."""
@@ -209,7 +198,7 @@ def calculate_all_derived_variables(ds_events: xr.Dataset) -> xr.Dataset:
     derived_ds_dict['div_250'] = calculate_div_250(ds_events)
     derived_ds_dict['conv_850'] = calculate_conv_850(ds_events)
     derived_ds_dict['mfc_850'] = calculate_mfc_850(ds_events)
-    derived_ds_dict['shear_250_850'] = calculate_shear_250_850(ds_events)
+    derived_ds_dict['shear_500_850'] = calculate_shear_500_850(ds_events)
     derived_ds_dict['pv_500'] = calculate_pv_500(ds_events)
     return xr.Dataset(derived_ds_dict, coords=ds_events.coords)
 
