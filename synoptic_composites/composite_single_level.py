@@ -20,6 +20,7 @@ from typing import List, Dict, Any, Optional
 # MetPy for dynamic calculations
 from metpy.calc import (
     potential_vorticity_baroclinic,
+    vorticity,
     lat_lon_grid_deltas,
     potential_temperature,
     divergence as mp_divergence
