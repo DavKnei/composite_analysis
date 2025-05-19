@@ -80,8 +80,8 @@ def main():
     parser.add_argument(
         "--window_hours",
         type=int,
-        default=24,
-        help="Number of hours +/- around an MCS event to exclude (default: 24)"
+        default=48,
+        help="Number of hours +/- around an MCS event to exclude (default: 48)"
     )
     parser.add_argument(
         "--freq",
