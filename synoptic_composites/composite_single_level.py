@@ -205,7 +205,7 @@ def calculate_rv_500(ds_events: xr.Dataset) -> xr.DataArray:
     v500 = ds_events.v.sel(level=500)
     rel_vorticity = vorticity(u500, v500)
     rel_vorticity.attrs.update({'units': 's-1', 'long_name': 'Relative Vorticity at 500 hPa'})
-    return rel_vorticity.rename("rel_vorticity_500")
+    return rel_vorticity.rename("rv_500")
 
 def calculate_all_derived_variables(ds_events: xr.Dataset) -> xr.Dataset:
     """Calculates all derived variables for the given event dataset."""
@@ -218,7 +218,7 @@ def calculate_all_derived_variables(ds_events: xr.Dataset) -> xr.Dataset:
     derived_ds_dict['mfc_850'] = calculate_mfc_850(ds_events)
     derived_ds_dict['shear_500_850'] = calculate_shear_500_850(ds_events)
     derived_ds_dict['pv_500'] = calculate_pv_500(ds_events)
-    derived_ds_dict['rel_vorticity_500'] = calculate_rv_500(ds_events)
+    derived_ds_dict['rv_500'] = calculate_rv_500(ds_events)
     return xr.Dataset(derived_ds_dict, coords=ds_events.coords)
 
 
