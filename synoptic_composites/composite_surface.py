@@ -131,7 +131,7 @@ def save_composites(out: Path, data_var: str,
                 # extract arrays safely
                 raw_cnt = comp['count']
                 if raw_cnt is None:
-                    cnt = 0
+                    cnt = np.array(0)
                 else:
                     cnt = raw_cnt.values if hasattr(raw_cnt, 'values') else raw_cnt
                 raw_sum = comp['sum']

@@ -284,7 +284,7 @@ def main():
     df[base_col] = df[base_col].dt.round("H")
 
     # Add year and month for filtering
-    df['year'] = df[base_col].dt.year
+    df['year'] = pd.to_datetime(df[base_col]).dt.year
     df['event_month_for_filter'] = df[base_col].dt.month
 
     # Filter by period
@@ -326,7 +326,7 @@ def main():
         for off in time_offsets:
             col = offset_cols[off]
             df_off = df_wt.dropna(subset=[col]).copy()
-            df_off['year'] = df_off[col].dt.year
+            df_off['year'] = pd.to_datetime(df_off[col]).dt.year
             df_off['month_for_group'] = df_off['event_month_for_filter']
             groups = df_off.groupby(['year', 'month_for_group'])
 
