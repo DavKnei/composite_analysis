@@ -236,7 +236,7 @@ def main():
                         help="Name of the data variable to composite (e.g., precipitation, tp)")
     parser.add_argument("--file_pattern", type=str, default="{year}.nc",
                         help="Filename pattern with {year} placeholder (e.g., {year}.nc or era5_precip_{year}.nc)")
-    parser.add_argument("--wt_csv_base", type=str, default="./csv/composite_",
+    parser.add_argument("--wt_csv_base", type=str, default="/nas/home/dkn/Desktop/MoCCA/composites/scripts/synoptic_composites/csv/composite_",
                         help="Base path for composite CSV files (e.g., './csv/composite_')")
     parser.add_argument("--region", type=str, required=True,
                         help="Subregion name, used to find CSV file (e.g., southern_alps)")

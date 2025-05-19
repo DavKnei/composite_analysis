@@ -573,7 +573,7 @@ def main():
                         help="Base directory where period-specific JJA climatology files are stored.")
     parser.add_argument("--period", type=str, default="evaluation", choices=PERIODS.keys(),
                         help=f"Climatology period to use: {list(PERIODS.keys())}. Default: evaluation.")
-    parser.add_argument("--comp_csv_base", type=str, default='./csv/composite_',
+    parser.add_argument("--comp_csv_base", type=str, default='/nas/home/dkn/Desktop/MoCCA/composites/scripts/synoptic_composites/csv/composite_',
                         help="Base path for composite CSV files (e.g., './csv/composite_')")
     parser.add_argument("--levels", type=str, default="250,500,850",
                         help="Comma-separated pressure levels in hPa (e.g., 250,500,850)")

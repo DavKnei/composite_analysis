@@ -268,7 +268,7 @@ def main():
     parser = argparse.ArgumentParser(description="Compute JJA single-level derived composites.")
     parser.add_argument("--data_dir", type=Path, default="/data/reloclim/normal/INTERACT/ERA5/pressure_levels", help="Directory with ERA5 monthly files")
     parser.add_argument("--period", choices=list(PERIODS.keys()), default="evaluation", help="Period to process")
-    parser.add_argument("--wt_csv_base", default="./csv/composite_", help="Base path for weather type CSVs")
+    parser.add_argument("--wt_csv_base", default="/nas/home/dkn/Desktop/MoCCA/composites/scripts/synoptic_composites/csv/composite_", help="Base path for weather type CSVs")
     parser.add_argument("--region", required=True, help="Region identifier for CSV/output")
     parser.add_argument("--output_dir", type=Path, default="/home/dkn/composites/ERA5/", help="Output directory")
     parser.add_argument("--time_offsets", default="-12,0,12", help="Comma-separated time offsets in hours")

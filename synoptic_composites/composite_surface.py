@@ -173,7 +173,7 @@ def main():
     parser.add_argument("--period",      choices=PERIODS, default="evaluation")
     parser.add_argument("--data_var",    default="msl")
     parser.add_argument("--file_pattern",default="slp_{year}_NA.nc")
-    parser.add_argument("--wt_csv_base", default="./csv/composite_")
+    parser.add_argument("--wt_csv_base", default="/nas/home/dkn/Desktop/MoCCA/composites/scripts/synoptic_composites/csv/composite_")
     parser.add_argument("--region",      required=True)
     parser.add_argument("--output_dir",  type=Path,
                         default="/home/dkn/composites/ERA5/",        help="Output directory")
