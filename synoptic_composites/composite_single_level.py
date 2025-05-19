@@ -20,7 +20,6 @@ from typing import List, Dict, Any, Optional
 # MetPy for dynamic calculations
 from metpy.calc import (
     potential_vorticity_baroclinic,
-    vorticity
     lat_lon_grid_deltas,
     potential_temperature,
     divergence as mp_divergence
@@ -160,6 +159,24 @@ def calculate_div_250(ds_events: xr.Dataset) -> xr.DataArray:
 
 def calculate_conv_850(ds_events: xr.Dataset) -> xr.DataArray:
     u850 = ds_events.u.sel(level=850)
+    v850 = ds_events.v.sel(level=850)
+    conv = (_calculate_divergence_base(u850, v850) * -1.0).drop_vars('level', errors='ignore')
+    conv.attrs.update({'units': 's-1', 'long_name': 'Convergence of horizontal wind at 850 hPa'})
+    return conv.rename("conv_850")
+
+def calculate_mfc_850(ds_events: xr.Dataset) -> xr.DataArray:
+    u850 = ds_events.u.sel(level=850)
+    v850 = ds_events.v.sel(level=850)
+    q850 = ds_events.q.sel(level=850) 
+    
+    uq850 = (u850 * q850).rename("uq850")
+    vq850 = (v850 * q850).rename("vq850")
+    
+    mfc = (_calculate_divergence_base(uq850, vq850) * -1.0).drop_vars('level', errors='ignore')
+    mfc.attrs.update({'units': 'kg kg-1 s-1', 'long_name': 'Moisture flux convergence at 850 hPa'})
+    return mfc.rename("mfc_850")
+
+def calculate_shear_500_850(ds_events: xr.Dataset) -> xr.DataArray:
     u500 = ds_events.u.sel(level=500)
     v500 = ds_events.v.sel(level=500)
     u850 = ds_events.u.sel(level=850)
@@ -200,6 +217,7 @@ def calculate_all_derived_variables(ds_events: xr.Dataset) -> xr.Dataset:
     derived_ds_dict['mfc_850'] = calculate_mfc_850(ds_events)
     derived_ds_dict['shear_500_850'] = calculate_shear_500_850(ds_events)
     derived_ds_dict['pv_500'] = calculate_pv_500(ds_events)
+    derived_ds_dict['rel_vorticity_500'] = calculate_rv_500(ds_events)
     return xr.Dataset(derived_ds_dict, coords=ds_events.coords)
 
 
