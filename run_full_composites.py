@@ -2,19 +2,22 @@
 import subprocess
 
 # Define the list of regions
-regions = ["southern_alps", "eastern_alps", "western_alps", "dinaric_alps"]
+regions = ["southern_alps", "western_alps", "dinaric_alps"]
 
 # Loop over each region
 for region in regions:
     print(f"\n=== Processing region: {region} ===")
     
     # List of commands to run for the given region.
-    # Note: Only the first command requires the region parameter.
     commands = [
-        #["python", "lamb_weathertypes_msl.py", "--region", region],
         ["python", "03_filter_composite_times.py", "--region", region],
-        ["python", "create_composites_pressure_levels_wt.py",  "--region", region],
-        ["python", "create_composites_surface_flex.py",  "--region", region]
+        ["python", "04_get_nomcs_datetimes.py", "--region", region],
+        ["python", "./synoptic_composites/composite_pressure_levels.py",  "--region", region],
+        ["python", "./synoptic_composites/composite_pressure_levels.py",  "--region", region, "--noMCS"],
+        ["python", "./synoptic_composites/composite_surface.py", "--region", region],
+        ["python", "./synoptic_composites/composite_surface.py", "--region", region, "--noMCS"],
+        ["python", "./synoptic_composites/composite_surface_precipitation.py", "--region", region],
+        ["python", "./synoptic_composites/composite_surface_precipitation.py", "--region", region, "--noMCS"],
     ]
     
     # Execute each command sequentially
@@ -29,5 +32,3 @@ for region in regions:
     
     print(f"Finished processing region: {region}")
 print("\nAll regions processed successfully.")
-subprocess.run(["python", "run_comp_plots.py"])
-print("All composites plotted")
