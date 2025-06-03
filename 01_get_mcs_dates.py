@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Script to extract MCS events that are fully inside the Greater Alpine Region (GAR)
+Script to extract MCS events that are fully inside European Domain
 from netCDF track files. For each qualifying track (using the variable
-cloudtracknumber_nomergesplit), the script calculates:
+pcptracknumber), the script calculates:
 
     The datetime (parsed from the filename)
     The precipitation‐weighted center point (lat, lon)
     The total precipitation (sum over all grid cells in the track)
     The area (number of grid cells, later convertible to physical area)
-    The unique track number (cloudtracknumber_nomergesplit)
+    The unique track number (pcptracknumber)
 
 Results are saved into a CSV file.
 
@@ -16,26 +16,27 @@ The script supports parallel processing using multiprocessing (default 32 cores)
 or serial processing for debugging.
 
 Usage:
-    python extract_mcs_in_gar.py [--ncores N] [--serial]
+    python 01_get_mcs_dates.py [--ncores N] [--serial]
 
-Author: Your Name
-Date: YYYY-MM-DD
+Author: David Kneidinger
+Date: 2025-06-03
 """
 
 import os
 import glob
 import argparse
 from datetime import datetime
+from pathlib import Path
 import numpy as np
 import netCDF4 as nc
 import csv
 from multiprocessing import Pool
 
-# Define the Greater Alpine Region boundaries
-GAR_LON_MIN = -10.0
-GAR_LON_MAX = 25.0
-GAR_LAT_MIN = 35.0
-GAR_LAT_MAX = 52.0
+# Define the EURO-CORDEX boundaries
+LON_MIN = -20
+LON_MAX = 43
+LAT_MIN = 25
+LAT_MAX = 65
 
 
 def parse_datetime_from_filename(filename):
@@ -57,8 +58,8 @@ def parse_datetime_from_filename(filename):
 def process_file(file_path):
     """
     Process a single netCDF file.
-    For each unique MCS track (using cloudtracknumber_nomergesplit),
-    check if all grid points for that track are inside GAR.
+    For each unique MCS track (using pcptracknumber),
+    check if all grid points for that track are inside European Domain.
     If yes, compute the precipitation-weighted center, total precipitation,
     and area (number of grid cells).
 
@@ -74,7 +75,7 @@ def process_file(file_path):
 
     # Check that required variables exist
     required_vars = [
-        "cloudtracknumber_nomergesplit",
+        "pcptracknumber",
         "precipitation",
         "latitude",
         "longitude",
@@ -85,7 +86,7 @@ def process_file(file_path):
         return results
 
     # Read variables as numpy arrays
-    track_num = ds.variables["cloudtracknumber_nomergesplit"][:]
+    track_num = ds.variables["pcptracknumber"][:]
     precip = ds.variables["precipitation"][:]
     lat = ds.variables["latitude"][:]
     lon = ds.variables["longitude"][:]
@@ -112,12 +113,12 @@ def process_file(file_path):
         track_lons = lon[mask]
         track_precip = precip[mask]
 
-        # Check if the entire track footprint is inside GAR
+        # Check if the entire track footprint is inside European Domain
         if (
-            track_lats.min() >= GAR_LAT_MIN
-            and track_lats.max() <= GAR_LAT_MAX
-            and track_lons.min() >= GAR_LON_MIN
-            and track_lons.max() <= GAR_LON_MAX
+            track_lats.min() >= LAT_MIN
+            and track_lats.max() <= LAT_MAX
+            and track_lons.min() >= LON_MIN
+            and track_lons.max() <= LON_MAX
         ):
 
             # Compute precipitation-weighted center point
@@ -159,7 +160,7 @@ def get_all_files(root_dir):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Extract MCS events fully inside the Greater Alpine Region from track files."
+        description="Extract MCS events fully inside the European Domain from track files."
     )
     parser.add_argument(
         "--root",
@@ -168,7 +169,7 @@ def main():
         help="Root directory containing MCS track files (organized by YYYY/MM/)",
     )
     parser.add_argument(
-        "--output", type=str, default="./csv/mcs_exp_GAR_index.csv", help="Output CSV file name"
+        "--output", type=str, default="synoptic_composites/csv/mcs_EUR_index.csv", help="Output CSV file name"
     )
     parser.add_argument(
         "--ncores",
@@ -208,7 +209,9 @@ def main():
         "total_precip",
         "area",
     ]
-    with open(args.output, "w", newline="") as csvfile:
+    out_path = Path(args.output)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(out_path, "w", newline="") as csvfile:
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
         writer.writeheader()
         for row in all_results:
