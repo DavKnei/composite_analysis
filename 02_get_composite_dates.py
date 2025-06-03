@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """ Script to calculate MCS initiation times from an MCS index CSV file. 
-For each unique MCS (using cloudtracknumber_nomergesplit), 
+For each unique MCS (using pcptracknumber), 
 the script determines the initiation time (the earliest datetime) and saves these as mcs_initiation.csv. 
 
-Usage: python calculate_mcs_times.py --input mcs_exp_GAR_index.csv
+Usage: python 02_get_composite_date.py --input mcs_EUR_index.csv
 
 Author: David Kneidinger: 2025-03-25 """
 
 import argparse
 import pandas as pd
+from pathlib import Path
 import numpy as np
 from datetime import timedelta
 
@@ -42,13 +43,13 @@ def main():
     parser.add_argument(
         "--input",
         type=str,
-        default="./csv/mcs_exp_GAR_index.csv",
+        default="./csv/mcs_EUR_index.csv",
         help="Input CSV file with MCS events",
     )
     parser.add_argument(
         "--init_output",
         type=str,
-        default="./csv/mcs_initiation_dates_exp_GAR.csv",
+        default="./csv/mcs_initiation_dates_EUR.csv",
         help="Output CSV file for MCS initiation times",
     )
     args = parser.parse_args()
