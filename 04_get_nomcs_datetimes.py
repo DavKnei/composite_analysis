@@ -83,7 +83,7 @@ def main():
     parser.add_argument(
         "--output",
         type=str,
-        default="./csv/composite_",
+        default="./synoptic_composites/csv/composite_",
         help="Output CSV file path for 'noMCS' times",
     )
 
