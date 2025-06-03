@@ -11,24 +11,17 @@ For MCS events:
   - Saves the resulting DataFrame as a CSV.
 
 Usage:
-  python 03_filter_composite_times.py --mcs_csv mcs_initiation.csv --region southern_alps --times -6,-3,0,3,6 --window 48 --output_prefix composite_
+  python 03_filter_composite_times.py --mcs_csv mcs_initiation.csv --region southern_alps --times -6,-3,0,3,6 --output_prefix composite_
 
-Author: David Kneidinger (updated)
+Author: David Kneidinger
 Date: 2025-03-26
 """
 
 import argparse
 import pandas as pd
 import numpy as np
+import yaml
 from datetime import timedelta
-
-# Define subregion boundaries
-SUBREGIONS = {
-    'western_alps': {'lon_min': 3,   'lon_max': 8,   'lat_min': 43, 'lat_max': 49},
-    'southern_alps': {'lon_min': 8,   'lon_max': 13,  'lat_min': 43, 'lat_max': 46},
-    'dinaric_alps':  {'lon_min': 13,  'lon_max': 20,  'lat_min': 42, 'lat_max': 46},
-    'eastern_alps':  {'lon_min': 8,   'lon_max': 17,  'lat_min': 46, 'lat_max': 49}
-}
 
 def filter_by_region(df, region_bounds, lat_col='center_lat', lon_col='center_lon'):
     """Return rows where the center coordinates are within the specified region bounds."""
@@ -65,12 +58,12 @@ def main():
     parser = argparse.ArgumentParser(
         description="Filter MCS initiation times for a specific subregion and produce a composite CSV file."
     )
-    parser.add_argument("--mcs_csv", type=str, default="synoptic_composites/csv/mcs_initiation_dates_exp_GAR.csv",
+    parser.add_argument("--mcs_csv", type=str, default="./csv/mcs_initiation_dates_EUR.csv",
                         help="Input CSV file with MCS initiation times")
     parser.add_argument("--weather_type_csv", type=str, default="./weather_typing/csv/GWT_Z500_",
                         help="Input CSV file with weather types")
     parser.add_argument("--region", type=str, required=True,
-                        help="Subregion to consider (e.g., western_alps, southern_alps, dinaric_alps, eastern_alps)")
+                        help="Subregion to consider (e.g., Alps)")
     parser.add_argument("--times", type=str, default="-12,-6,0,6,12",
                         help="Comma-separated list of time offsets in hours (e.g., -12,-6,0,6,12)")
     parser.add_argument("--output_prefix", type=str, default="synoptic_composites/csv/composite_",
@@ -78,11 +71,14 @@ def main():
     args = parser.parse_args()
     
     region_key = args.region
-    if region_key not in SUBREGIONS:
-        print(f"Error: region '{region_key}' is not defined. Available regions: {list(SUBREGIONS.keys())}")
+    with open("regions.yaml", 'r') as f:
+        regions_data = yaml.safe_load(f)
+    if args.region not in regions_data:
+        print(f"ERROR: Region '{args.region}' not found in regions.yaml.")
         return
-    region_bounds = SUBREGIONS[region_key]
-    
+    region_bounds = regions_data[args.region]
+    print(f"Processing for region: {args.region} {region_bounds}")
+
     # Parse offsets into a list of integers
     offset_hours = [int(x) for x in args.times.split(",")]
     
