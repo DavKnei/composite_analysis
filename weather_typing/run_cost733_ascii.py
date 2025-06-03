@@ -122,8 +122,8 @@ def run(method: str, ncl: int, start: str, region: str, mon_str: str):
 # ───────────────────────── command line ─────────────────────
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--method", required=True, choices=METHOD_SPECS)
-    ap.add_argument("--ncl",    type=int, default=27)
+    ap.add_argument("--method", default="GWT_Z500", choices=METHOD_SPECS)
+    ap.add_argument("--ncl",    type=int, default=10)
     ap.add_argument("--region", required=True)
     ap.add_argument("--start",  default="2001-01-01")
     ap.add_argument("--months", default="1,2,3,4,5,6,7,8,9,10,11,12",
