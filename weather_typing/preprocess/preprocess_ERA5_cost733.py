@@ -79,7 +79,7 @@ def main(start: int, end: int, ncores: int, pl_dir: Path, out_dir: Path) -> None
     print("💾  Writing NetCDFs …")
     with ProgressBar():
         z500.to_netcdf(
-            out_dir / f"z500_gb_daily_{start}_{end}.nc", encoding=_nc_enc(z500, "z500")
+            out_dir / f"z500_EUR_daily_{start}_{end}.nc", encoding=_nc_enc(z500, "z500")
         )
 
     print("✅  Done – files saved in", out_dir)
