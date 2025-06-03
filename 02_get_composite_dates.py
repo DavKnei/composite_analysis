@@ -9,9 +9,6 @@ Author: David Kneidinger: 2025-03-25 """
 
 import argparse
 import pandas as pd
-from pathlib import Path
-import numpy as np
-from datetime import timedelta
 
 
 def get_mcs_initiation_times(input_csv, output_csv):
@@ -35,7 +32,6 @@ def get_mcs_initiation_times(input_csv, output_csv):
     return initiation_df
 
 
-
 def main():
     parser = argparse.ArgumentParser(
         description="Calculate MCS initiation from an MCS index CSV file."
@@ -56,6 +52,7 @@ def main():
 
     # Get the initiation times.
     initiation_df = get_mcs_initiation_times(args.input, args.init_output)
+
 
 if __name__ == "__main__":
     main()

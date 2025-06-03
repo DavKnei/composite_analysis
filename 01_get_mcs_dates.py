@@ -104,7 +104,7 @@ def process_file(file_path):
 
     count = 0
     for t in unique_tracks:
-        
+
         mask = track_num == t
         if not np.any(mask):
             continue
@@ -169,7 +169,10 @@ def main():
         help="Root directory containing MCS track files (organized by YYYY/MM/)",
     )
     parser.add_argument(
-        "--output", type=str, default="/csv/mcs_EUR_index.csv", help="Output CSV file name"
+        "--output",
+        type=str,
+        default="/csv/mcs_EUR_index.csv",
+        help="Output CSV file name",
     )
     parser.add_argument(
         "--ncores",
@@ -190,7 +193,7 @@ def main():
         for f in files:
             res = process_file(f)
             all_results.extend(res)
-            
+
     else:
         with Pool(processes=args.ncores) as pool:
             results = pool.map(process_file, files)
