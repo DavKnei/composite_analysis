@@ -169,7 +169,7 @@ def main():
         help="Root directory containing MCS track files (organized by YYYY/MM/)",
     )
     parser.add_argument(
-        "--output", type=str, default="synoptic_composites/csv/mcs_EUR_index.csv", help="Output CSV file name"
+        "--output", type=str, default="/csv/mcs_EUR_index.csv", help="Output CSV file name"
     )
     parser.add_argument(
         "--ncores",
