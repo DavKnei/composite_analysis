@@ -24,6 +24,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import yaml
 import xarray as xr
 import dask
 from dask.diagnostics import ProgressBar
@@ -33,30 +34,29 @@ ENC_NC = dict(zlib=True, complevel=4, dtype="float32", _FillValue=FILL_VALUE)
 
 # ───────────────────────── helpers ──────────────────────────
 
-def calc_center_lat_lon(region: str) -> tuple[float, float]:
+
+def calc_center_lat_lon(region: str, f: Path) -> tuple[float, float]:
     """Calculate center lat/lon for predefined regions."""
-    SUBREGIONS = {
-        "western_alps":  dict(lon_min=3,   lon_max=8,   lat_min=43, lat_max=49),
-        "southern_alps": dict(lon_min=7.5, lon_max=13,  lat_min=43, lat_max=46),
-        "dinaric_alps":  dict(lon_min=12.5,lon_max=20,  lat_min=42, lat_max=46),
-        "eastern_alps":  dict(lon_min=8,   lon_max=17,  lat_min=46, lat_max=49),
-        "britain": dict(lon_min=-20,   lon_max=10,  lat_min=45, lat_max=65),
-    }
+    with open("../../regions.yaml", "r") as f:
+        SUBREGIONS = yaml.safe_load(f)
     if region not in SUBREGIONS:
-        raise ValueError(f"Unknown region: {region}. Available: {list(SUBREGIONS.keys())}")
+        (f"{region} not in regions.yaml. Available: {list(SUBREGIONS.keys())}")
+
     b = SUBREGIONS[region]
     return (b["lat_min"] + b["lat_max"]) / 2, (b["lon_min"] + b["lon_max"]) / 2
 
 
-def regrid_bilinear(da: xr.DataArray, lon_step: float = 1.0, lat_step: float = 1.0) -> xr.DataArray:
+def regrid_bilinear(
+    da: xr.DataArray, lon_step: float = 1.0, lat_step: float = 1.0
+) -> xr.DataArray:
     """Bilinear regridding (e.g., 0.25° → 1°); Dask‑safe."""
     print(f"Regridding {da.name} to {lat_step}x{lon_step} degree...")
     lon_new = np.arange(np.floor(da.lon.min()), np.ceil(da.lon.max()) + 1e-6, lon_step)
     lat_new = np.arange(np.floor(da.lat.min()), np.ceil(da.lat.max()) + 1e-6, lat_step)
     # Ensure longitude wraps correctly if needed (though less critical for regional domains)
     if lon_new.max() > 180 and da.lon.min() >= 0:
-         # Crude check if we might need wrapping logic for global data
-         pass # Add wrapping logic if necessary for global data conversion
+        # Crude check if we might need wrapping logic for global data
+        pass  # Add wrapping logic if necessary for global data conversion
 
     # Preserve attributes
     original_attrs = da.attrs
@@ -82,12 +82,12 @@ def gaussian_lowpass_31day(da: xr.DataArray, sigma: float = 7.3) -> xr.DataArray
         np.exp(-0.5 * ((np.arange(window_size) - window_size // 2) / sigma) ** 2),
         dims=[window_dim],
     )
-    weights /= weights.sum() # Normalize weights
+    weights /= weights.sum()  # Normalize weights
 
     # Pad the array to handle boundaries; mode='reflect' is often suitable
     # Use pad_width that matches half the window size
     pad_width = window_size // 2
-    padded_da = da.pad(time=(pad_width, pad_width), mode='reflect')
+    padded_da = da.pad(time=(pad_width, pad_width), mode="reflect")
 
     # Apply the rolling operation and dot product with weights
     # Ensure rolling happens along the 'time' dimension
@@ -98,13 +98,15 @@ def gaussian_lowpass_31day(da: xr.DataArray, sigma: float = 7.3) -> xr.DataArray
     smoothed_data = rolled_data.dot(weights, dims=window_dim)
 
     # 2. Convolve a mask of valid (non-NaN) data points
-    mask = xr.where(padded_da.notnull(), 1.0, 0.0) # 1 where valid, 0 where NaN
+    mask = xr.where(padded_da.notnull(), 1.0, 0.0)  # 1 where valid, 0 where NaN
     rolled_mask = mask.rolling(time=window_size, center=True).construct(window_dim)
     smoothed_mask = rolled_mask.dot(weights, dims=window_dim)
 
     # 3. Combine: Divide smoothed data by smoothed mask, avoid division by zero
-    epsilon = 1e-6 # To prevent division by very small numbers
-    filtered_padded = xr.where(smoothed_mask > epsilon, smoothed_data / smoothed_mask, np.nan)
+    epsilon = 1e-6  # To prevent division by very small numbers
+    filtered_padded = xr.where(
+        smoothed_mask > epsilon, smoothed_data / smoothed_mask, np.nan
+    )
 
     # Remove the padding by selecting the original time range
     # Use .isel to select by index, robust to time coordinate details
@@ -116,7 +118,7 @@ def gaussian_lowpass_31day(da: xr.DataArray, sigma: float = 7.3) -> xr.DataArray
     filtered_da.attrs = da.attrs
     # Ensure dtype is float32 if original was, as processing might change it
     if da.dtype == np.float32 or da.dtype == np.float64:
-         filtered_da = filtered_da.astype(np.float32)
+        filtered_da = filtered_da.astype(np.float32)
 
     return filtered_da
 
@@ -132,7 +134,9 @@ def normalize_data(da: xr.DataArray) -> xr.DataArray:
     original_attrs = da.attrs
     original_name = da.name
     # Calculate spatial mean, ensuring it keeps the 'time' dimension
-    spatial_mean_per_timestep = da.mean(dim=["lat", "lon"], skipna=True, keep_attrs=True)
+    spatial_mean_per_timestep = da.mean(
+        dim=["lat", "lon"], skipna=True, keep_attrs=True
+    )
     # Subtract the spatial mean (broadcasts along time)
     normalized_da = da - spatial_mean_per_timestep
     # Restore name and attributes
@@ -165,6 +169,8 @@ def high_pass_filter(da: xr.DataArray, sigma: float = 7.3) -> xr.DataArray:
     if da.dtype == np.float32 or da.dtype == np.float64:
         high_pass_da = high_pass_da.astype(np.float32)
     return high_pass_da
+
+
 # --- End Preprocessing ---
 
 
@@ -176,12 +182,14 @@ def save_ascii(da: xr.DataArray, out_path: Path, fmt: str = "%.3f") -> None:
     """
     print(f"Preparing ASCII output for {out_path}...")
     # Ensure correct order: time varies slowest, lon varies fastest within lat
-    mat = (da.transpose("time", "lat", "lon")
-              .sortby("lat", ascending=True) # COST733 often expects South-to-North
-              .sortby("lon", ascending=True) # West-to-East
-              .fillna(FILL_VALUE)            # Use fill value for NaNs
-              .astype(np.float32)            # Ensure float32
-              .values.reshape(da.sizes["time"], -1)) # Reshape time x (lat*lon)
+    mat = (
+        da.transpose("time", "lat", "lon")
+        .sortby("lat", ascending=True)  # COST733 often expects South-to-North
+        .sortby("lon", ascending=True)  # West-to-East
+        .fillna(FILL_VALUE)  # Use fill value for NaNs
+        .astype(np.float32)  # Ensure float32
+        .values.reshape(da.sizes["time"], -1)
+    )  # Reshape time x (lat*lon)
 
     # Save the matrix
     np.savetxt(out_path, mat, fmt=fmt)
@@ -190,17 +198,42 @@ def save_ascii(da: xr.DataArray, out_path: Path, fmt: str = "%.3f") -> None:
 
 # ───────────────────────── main ─────────────────────────────
 
+
 def main() -> None:
-    p = argparse.ArgumentParser(description="Convert daily NetCDF to COST733 ASCII + NC (fast) with manual preprocessing")
-    p.add_argument("--inpath",  type=Path,
-                   default="/home/dkn/ERA5/z500_daily_2001_2020.nc",
-                   help="input NetCDF file")
-    p.add_argument("--outpath", type=Path,
-                   default="/home/dkn/ERA5/slp_daily_2001_2020_filtered", # Changed default name
-                   help="output root (without extension), '_filtered' suffix recommended")
-    p.add_argument("--data_var", required=True, help="variable name in NetCDF (e.g. z500, msl, z850)")
-    p.add_argument("--chunks", default="time:365", help="dask chunk spec, e.g. time:365")
-    p.add_argument("--skip_filter", action="store_true", help="Skip normalization and filtering steps")
+    p = argparse.ArgumentParser(
+        description="Convert daily NetCDF to COST733 ASCII + NC (fast) with manual preprocessing"
+    )
+    p.add_argument(
+        "--inpath",
+        type=Path,
+        default="/home/dkn/ERA5/z500_EUR_daily_2001_2020.nc",
+        help="input NetCDF file",
+    )
+    p.add_argument(
+        "--regions_file",
+        type=Path,
+        default="../../regions.yaml",
+        help=".yaml file including the SUBREGIONS",
+    )
+    p.add_argument(
+        "--outpath",
+        type=Path,
+        default="/home/dkn/ERA5/z500_daily_2001_2020_filtered",  # Changed default name
+        help="output root (without extension), '_filtered' suffix recommended",
+    )
+    p.add_argument(
+        "--data_var",
+        required=True,
+        help="variable name in NetCDF (e.g. z500, msl, z850)",
+    )
+    p.add_argument(
+        "--chunks", default="time:365", help="dask chunk spec, e.g. time:365"
+    )
+    p.add_argument(
+        "--skip_filter",
+        action="store_true",
+        help="Skip normalization and filtering steps",
+    )
     args = p.parse_args()
 
     if not args.inpath.exists():
@@ -212,8 +245,9 @@ def main() -> None:
     # cluster = LocalCluster(n_workers=4, threads_per_worker=8) # Example config
     # client = Client(cluster)
     # print(f"Dask dashboard link: {client.dashboard_link}")
-    dask.config.set(scheduler="threads") # Use threads scheduler if not using distributed
-
+    dask.config.set(
+        scheduler="threads"
+    )  # Use threads scheduler if not using distributed
 
     chunk_dict = {k: int(v) for k, v in (c.split(":") for c in args.chunks.split(","))}
     print(f"Opening dataset {args.inpath} with chunks: {chunk_dict}")
@@ -223,10 +257,9 @@ def main() -> None:
     except ValueError as e:
         print(f"Warning: Error opening with default engine: {e}. Trying h5netcdf...")
         try:
-             ds = xr.open_dataset(args.inpath, chunks=chunk_dict, engine='h5netcdf')
+            ds = xr.open_dataset(args.inpath, chunks=chunk_dict, engine="h5netcdf")
         except Exception as e2:
-             sys.exit(f"Failed to open dataset {args.inpath} with both engines: {e2}")
-
+            sys.exit(f"Failed to open dataset {args.inpath} with both engines: {e2}")
 
     # Ensure ascending latitude (South to North)
     if ds.lat.values[0] > ds.lat.values[-1]:
@@ -235,25 +268,25 @@ def main() -> None:
 
     # Select the data variable
     if args.data_var not in ds:
-         sys.exit(f"Error: Variable '{args.data_var}' not found in {args.inpath}. Available variables: {list(ds.data_vars)}")
+        sys.exit(
+            f"Error: Variable '{args.data_var}' not found in {args.inpath}. Available variables: {list(ds.data_vars)}"
+        )
     da_full = ds[args.data_var]
     # Ensure data is float32 for processing
-    if da_full.dtype != np.float32 :
+    if da_full.dtype != np.float32:
         print(f"Converting data type from {da_full.dtype} to float32.")
         da_full = da_full.astype(np.float32)
 
-
     # Define regions to process
-    regions_to_process = ["southern_alps", "eastern_alps", "western_alps", "dinaric_alps"]
-
+    regions_to_process = ["Alps"]
 
     for region in regions_to_process:
         print(f"\n--- Processing region: {region} ---")
         try:
-            lat_c, lon_c = calc_center_lat_lon(region)
+            lat_c, lon_c = calc_center_lat_lon(region, args.regions_file)
         except ValueError as e:
             print(f"Skipping region {region}: {e}")
-            continue # Skip to the next region if definition is missing
+            continue  # Skip to the next region if definition is missing
 
         # Regrid to 1 degree
         da_reg = regrid_bilinear(da_full, 1.0, 1.0)
@@ -265,8 +298,10 @@ def main() -> None:
         # Use .sel for selection
         da_reg = da_reg.sel(lat=slice(lat_min, lat_max), lon=slice(lon_min, lon_max))
         # Check if the selection resulted in valid dimensions
-        if da_reg.sizes['lat'] == 0 or da_reg.sizes['lon'] == 0:
-            print(f"Warning: Spatial selection for region '{region}' resulted in zero size. Skipping.")
+        if da_reg.sizes["lat"] == 0 or da_reg.sizes["lon"] == 0:
+            print(
+                f"Warning: Spatial selection for region '{region}' resulted in zero size. Skipping."
+            )
             continue
 
         # --- Apply Manual Preprocessing ---
@@ -275,21 +310,21 @@ def main() -> None:
             da_processed = high_pass_filter(da_reg)
             # 2. Normalize (@nrm:1)
             da_processed = normalize_data(da_processed)
-            
+
         else:
             print("Skipping manual normalization and filtering steps.")
-            da_processed = da_reg # Use original regional data if skipping
+            da_processed = da_reg  # Use original regional data if skipping
 
         # Ensure the variable has a name (can be lost in processing)
         if da_processed.name is None:
             da_processed = da_processed.rename(args.data_var)
 
         # Define output paths
-        root = Path(str(args.outpath)) # Use the specified output path root
+        root = Path(str(args.outpath))  # Use the specified output path root
         # Add region to the filename stem
         ascii_path = root.with_stem(root.stem + f"_{region}").with_suffix(".dat")
-        nc_path    = ascii_path.with_suffix(".nc")
-        ascii_path.parent.mkdir(parents=True, exist_ok=True) # Ensure output dir exists
+        nc_path = ascii_path.with_suffix(".nc")
+        ascii_path.parent.mkdir(parents=True, exist_ok=True)  # Ensure output dir exists
 
         # Transpose for saving
         da_save = da_processed.transpose("time", "lat", "lon")
@@ -302,23 +337,17 @@ def main() -> None:
             da_save_computed = da_save.compute()
 
             # Save ASCII
-            save_ascii(da_save_computed, ascii_path) # Pass the computed array
+            save_ascii(da_save_computed, ascii_path)  # Pass the computed array
 
             # Save NetCDF
             print(f"Saving NetCDF to {nc_path}...")
             # Define encoding for the specific variable
             encoding_var = {da_save_computed.name: ENC_NC}
-            da_save_computed.astype("float32").to_netcdf(
-                nc_path,
-                encoding=encoding_var
-            )
+            da_save_computed.astype("float32").to_netcdf(nc_path, encoding=encoding_var)
             print(f"💾  Wrote {nc_path}")
 
     print("\n--- Processing complete ---")
-    # if 'client' in locals(): # Close dask client if used
-    #     client.close()
-    # if 'cluster' in locals():
-    #      cluster.close()
+
 
 if __name__ == "__main__":
     main()
