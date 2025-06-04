@@ -4,7 +4,7 @@ Compute JJA ERA5 composites for MCS composite times at pressure levels
 for specific climatological periods and save as a multidimensional netCDF file
 with an extra weather type dimension. Includes WT0 (all events).
 
-Theta_e for event composites is calculated per timestep.
+Theta_e for event composites is calculated per timestep using an external module (calc_atmospheric_variables.py).
 Climatological reference for theta_e is loaded from a pre-calculated climatology file.
 Climatology files are expected to contain May-September data for specific periods,
 but composites are calculated ONLY for JJA (June, July, August).
@@ -32,7 +32,7 @@ Usage:
 
 Author: David Kneidinger
 Date: 2025-05-07
-Last Modified: 2025-06-03
+Last Modified: 2025-06-04
 """
 
 import os
@@ -42,14 +42,17 @@ from datetime import timedelta
 import pandas as pd
 import numpy as np
 import xarray as xr
-import yaml
+# import yaml # Not used directly in this script structure
 from multiprocessing import Pool
-import metpy.calc as mpcalc
+import metpy.calc as mpcalc # Retained for units, potentially other direct uses
 from metpy.units import units
 import warnings
 import logging
 from typing import List, Dict, Tuple, Any, Optional, Set
 from pathlib import Path
+
+# --- NEW IMPORT ---
+from calc_atmospheric_variables import calculate_theta_e_on_levels # For event theta_e calculation
 
 # --- Configuration ---
 # Logging setup happens in main() based on --debug flag
@@ -62,7 +65,6 @@ VAR_LIST = ['z', 't', 'q', 'u', 'v', 'w']
 # Variables calculated per timestep from VAR_LIST for event composites, then summed.
 CALCULATED_VARS_EVENT = ['theta_e']
 # All variables that will have a composite mean and a climatology mean in the output.
-# Theta_e's climatology is loaded directly.
 ALL_VARS_TO_SAVE = VAR_LIST + CALCULATED_VARS_EVENT
 
 # List of variables for which climatology files are expected to be loaded.
@@ -92,6 +94,7 @@ def reorder_lat(ds: xr.Dataset) -> xr.Dataset:
     lat_coord_name = None
     if 'latitude' in ds.coords: lat_coord_name = 'latitude'
     elif 'lat' in ds.coords: lat_coord_name = 'lat'
+
     if lat_coord_name and ds[lat_coord_name].values.size > 1 and ds[lat_coord_name].values[0] > ds[lat_coord_name].values[-1]:
         logging.debug(f"Reordering {lat_coord_name} to ascending.")
         sorted_lat_values = np.sort(ds[lat_coord_name].values)
@@ -101,9 +104,12 @@ def reorder_lat(ds: xr.Dataset) -> xr.Dataset:
 def fix_lat_lon_names(ds: xr.Dataset) -> xr.Dataset:
     """Ensure standard 'latitude' and 'longitude' coordinate names."""
     rename_dict = {}
-    if 'lat' in ds.coords and 'latitude' not in ds.coords: rename_dict['lat'] = 'latitude'
-    if 'lon' in ds.coords and 'longitude' not in ds.coords: rename_dict['lon'] = 'longitude'
-    if rename_dict: ds = ds.rename(rename_dict)
+    if 'lat' in ds.coords and 'latitude' not in ds.coords:
+        rename_dict['lat'] = 'latitude'
+    if 'lon' in ds.coords and 'longitude' not in ds.coords:
+        rename_dict['lon'] = 'longitude'
+    if rename_dict:
+        ds = ds.rename(rename_dict)
     return ds
 
 def create_offset_cols(df: pd.DataFrame) -> Dict[int, str]:
@@ -136,47 +142,13 @@ def create_offset_cols(df: pd.DataFrame) -> Dict[int, str]:
             raise ValueError("No suitable time column found in CSV.")
     return offset_cols
 
-
-def calculate_theta_e_from_xr(temp_da: xr.DataArray, spec_hum_da: xr.DataArray, pressure_val_hpa: float) -> xr.DataArray:
-    """
-    Calculates equivalent potential temperature from xarray DataArrays of T and Q.
-    Pressure is a scalar for the given level. T and Q can have multiple dimensions.
-    Handles units and ensures calculations are NaN-robust.
-    """
-    p_units = pressure_val_hpa * units.hPa
-    t_data_np = temp_da.data 
-    q_data_np = spec_hum_da.data
-
-    theta_e_data_np = np.full_like(t_data_np, np.nan, dtype=np.float32)
-
-    t_units_np = t_data_np * units.kelvin
-    q_units_np = q_data_np * units('kg/kg')
-    
-    valid_mask = np.isfinite(t_data_np) & np.isfinite(q_data_np) & (t_data_np > 0) & (q_data_np >= -1e-5)
-    
-    q_units_masked_np = np.where(valid_mask, q_units_np, np.nan) 
-    q_units_masked_np[q_units_masked_np < 0 * units('kg/kg')] = 0 * units('kg/kg')
-
-    if np.any(valid_mask): 
-        t_v = t_units_np[valid_mask]
-        q_v = q_units_masked_np[valid_mask]
-
-        sat_mr = mpcalc.saturation_mixing_ratio(p_units, t_v)
-        q_v = np.minimum(q_v, 1.2 * sat_mr)
-
-        dewpoint = mpcalc.dewpoint_from_specific_humidity(p_units, t_v, q_v)
-        theta_e_values = mpcalc.equivalent_potential_temperature(p_units, t_v, dewpoint)
-        theta_e_data_np[valid_mask] = theta_e_values.magnitude
-
-    return xr.DataArray(theta_e_data_np, coords=temp_da.coords, dims=temp_da.dims, name='theta_e', attrs={'units':'K'})
-
-
 # --- Core Processing Function ---
 def process_month_level_events(task: Tuple) -> Dict[str, Any]:
     """
     Process one (year, month, times_pd, era5_dir, levels, clim_ds) task.
     Calculates sums and counts for base variables and theta_e.
-    Theta_e for events is calculated; theta_e for climatology is taken from loaded clim_ds.
+    Theta_e for events is calculated using imported function; 
+    theta_e for climatology is taken from loaded clim_ds.
     Returns a dictionary: {"composite": comp_data}
     """
     year, month, times_pd, era5_dir, levels, clim_ds_input = task
@@ -243,14 +215,7 @@ def process_month_level_events(task: Tuple) -> Dict[str, Any]:
                 continue 
 
             if clim_month_ds is not None:
-                # Ensure all expected climatology variables (including theta_e now) are present before aligning
-                # Specific check for 't', 'q' (for raw theta_e) and 'theta_e' (for clim theta_e)
-                required_for_theta_e_clim = ['theta_e'] # if theta_e clim is loaded directly
-                # All other CLIM_VARS_TO_LOAD should also be checked if used directly.
-                # The main check is in main() for clim_ds, here we assume clim_month_ds is valid if not None.
-
                 clim_level_month_ds_temp = clim_month_ds.sel(level=lev_val, method="nearest")
-                # Align raw data grid with climatology grid (raises ValueError if mismatch)
                 xr.align(ds_level_raw_data.isel(time=0, drop=True), clim_level_month_ds_temp.isel(hour=0, drop=True), join="exact", copy=False)
                 clim_level_month_aligned = clim_level_month_ds_temp
                 logging.debug(f"Task {task_label} L{lev_val}: Grids match exactly.")
@@ -299,13 +264,19 @@ def process_month_level_events(task: Tuple) -> Dict[str, Any]:
                 logging.debug(f"Task {task_label} L{lev_val} V={var}: ClimSum shape: {clim_sum_arr.shape if clim_sum_arr is not None else 'None'}, NaNs: {np.isnan(clim_sum_arr).sum() if clim_sum_arr is not None else 'N/A'}")
 
             # --- Process theta_e ---
-            # RAW DATA THETA_E (calculated on-the-fly)
+            # RAW DATA THETA_E (calculated on-the-fly using imported function)
             if 't' in ds_level_raw_data and 'q' in ds_level_raw_data and ds_level_raw_data.time.size > 0:
-                t_raw = ds_level_raw_data['t'].load()
-                q_raw = ds_level_raw_data['q'].load()
-                theta_e_instantaneous_raw = calculate_theta_e_from_xr(t_raw, q_raw, float(lev_val))
+                # ds_level_raw_data contains t, q, and the 'level' coordinate for the current lev_val.
+                # .load() ensures that data is in memory before passing to the calculation function.
+                input_ds_for_theta_e = ds_level_raw_data[['t', 'q']].load()
+                
+                # Call the imported function. It expects a Dataset with 't', 'q', and 'level' coord.
+                # It returns a Dataset containing 'theta_e'.
+                theta_e_ds_result = calculate_theta_e_on_levels(input_ds_for_theta_e.compute())
+                theta_e_instantaneous_raw = theta_e_ds_result['theta_e'] 
+                
                 comp_data[level_key]["theta_e_sum"] = theta_e_instantaneous_raw.sum(dim='time', skipna=True).compute()
-                logging.debug(f"Task {task_label} L{lev_val} V=theta_e: Raw Sum calculated. Shape: {comp_data[level_key]['theta_e_sum'].shape}")
+                logging.debug(f"Task {task_label} L{lev_val} V=theta_e: Raw Sum calculated. Shape: {comp_data[level_key]['theta_e_sum'].shape if comp_data[level_key]['theta_e_sum'] is not None else 'None'}")
             else:
                 logging.debug(f"Task {task_label} L{lev_val}: Skipping theta_e_sum (raw T/Q missing or zero timesteps).")
                 if comp_data[level_key]['lat'] is not None:
@@ -316,15 +287,13 @@ def process_month_level_events(task: Tuple) -> Dict[str, Any]:
             if clim_level_month_aligned is not None and 'theta_e' in clim_level_month_aligned and \
                clim_level_month_aligned.hour.size > 0 and len(event_hours) > 0:
                 
-                # Directly use the pre-calculated theta_e climatology
-                theta_e_clim_hourly_da = clim_level_month_aligned['theta_e'].load()
-                
+                theta_e_clim_hourly_da = clim_level_month_aligned['theta_e'].load() # Using loaded theta_e clim
                 selected_clim_theta_e = theta_e_clim_hourly_da.sel(hour=xr.DataArray(event_hours, dims="event_hours_dim"))
                 
                 if selected_clim_theta_e.sizes.get("event_hours_dim", 0) > 0:
                     theta_e_clim_for_events_np = selected_clim_theta_e.compute().data 
                     comp_data[level_key]["theta_e_clim_sum"] = np.nansum(theta_e_clim_for_events_np, axis=0)
-                    logging.debug(f"Task {task_label} L{lev_val} V=theta_e: Loaded Clim Sum calculated. Shape: {comp_data[level_key]['theta_e_clim_sum'].shape}")
+                    logging.debug(f"Task {task_label} L{lev_val} V=theta_e: Loaded Clim Sum calculated. Shape: {comp_data[level_key]['theta_e_clim_sum'].shape if comp_data[level_key]['theta_e_clim_sum'] is not None else 'None'}")
                 else:
                     logging.debug(f"Task {task_label} L{lev_val}: Skipping loaded theta_e_clim_sum (selection by event_hours yielded no data).")
                     if comp_data[level_key]['lat'] is not None:
@@ -337,7 +306,6 @@ def process_month_level_events(task: Tuple) -> Dict[str, Any]:
                     comp_data[level_key]["theta_e_clim_sum"] = np.full(shape_sum, np.nan, dtype=np.float32)
 
     logging.debug(f"--- Finishing Task: {task_label} ---")
-    # ... (Final state logging remains the same)
     for lev_val_chk in levels: 
         level_key_chk = str(lev_val_chk)
         if level_key_chk in comp_data and comp_data[level_key_chk].get('count') is not None:
@@ -354,8 +322,6 @@ def process_month_level_events(task: Tuple) -> Dict[str, Any]:
 
 
 # --- Combination Functions ---
-# No changes needed in combine_tasks_results, as it generically handles *_sum and *_clim_sum
-# for all variables in ALL_VARS_TO_SAVE.
 def combine_tasks_results(task_results: List[Dict], levels: List[int]) -> Dict[str, Any]:
     """Combine task results for composites."""
     logging.debug(f"--- Combining results for {len(task_results)} tasks ---")
@@ -386,49 +352,46 @@ def combine_tasks_results(task_results: List[Dict], levels: List[int]) -> Dict[s
                 continue
             
             task_had_valid_level = True
-            # This logging can be verbose, consider reducing frequency if needed
             # logging.debug(f"  Combine task {i+1} L{lev_val}: Processing valid level. Count max: {np.max(count_val)}")
 
             if overall[key]['lat'] is None and res_level.get('lat') is not None:
                 overall[key]['lat'] = res_level.get('lat')
                 overall[key]['lon'] = res_level.get('lon')
                 overall[key]['count'] = count_val.astype(np.int32)
-                for var in ALL_VARS_TO_SAVE: # Iterate through all vars defined to be saved
+                for var in ALL_VARS_TO_SAVE:
                     overall[key][f"{var}_sum"] = res_level.get(f"{var}_sum") if res_level.get(f"{var}_sum") is not None else np.zeros_like(count_val, dtype=np.float64)
                     overall[key][f"{var}_clim_sum"] = res_level.get(f"{var}_clim_sum") if res_level.get(f"{var}_clim_sum") is not None else np.zeros_like(count_val, dtype=np.float64)
                 # logging.debug(f"    Initialized overall sums/counts for L{lev_val}.")
             elif overall[key]['lat'] is not None:
                 if overall[key]['count'] is not None and overall[key]['count'].shape == count_val.shape:
                     overall[key]['count'] += count_val.astype(np.int32)
-                    for var in ALL_VARS_TO_SAVE: # Iterate through all vars
+                    for var in ALL_VARS_TO_SAVE:
                         for sum_type_key_suffix in ["_sum", "_clim_sum"]:
                             sum_type = f"{var}{sum_type_key_suffix}"
                             current_sum = overall[key].get(sum_type)
                             new_sum = res_level.get(sum_type)
                             if new_sum is not None:
                                 if current_sum is not None and current_sum.shape == new_sum.shape:
-                                    # Ensure NaNs propagate correctly if one is NaN and other is not (+= handles this if float)
-                                    overall[key][sum_type] += new_sum 
+                                    overall[key][sum_type] += new_sum
                                     # logging.debug(f"      Accumulated {sum_type} L{lev_val}. New max: {np.nanmax(overall[key][sum_type]):.2f}")
                                 elif current_sum is None: 
                                     overall[key][sum_type] = new_sum.copy()
                                     # logging.debug(f"      Initialized {sum_type} L{lev_val} from task {i+1}.")
-                                else: # Shape mismatch
-                                     logging.warning(f"    Combine task {i+1} L{lev_val} Type={sum_type}: Shape mismatch. Overall: {current_sum.shape}, New: {new_sum.shape}. Skipping accumulation for this var/sum_type.")
-                else: # Count shape mismatch
-                    logging.warning(f"  Combine task {i+1} L{lev_val}: Shape mismatch for count or overall count not init. Overall: {overall[key]['count'].shape if overall[key]['count'] is not None else 'None'}, New: {count_val.shape}. Skipping accumulation.")
+                                else: 
+                                     logging.warning(f"    Combine task {i+1} L{lev_val} Type={sum_type}: Shape mismatch. Overall: {current_sum.shape}, New: {new_sum.shape}. Skipping.")
+                else:
+                    logging.warning(f"  Combine task {i+1} L{lev_val}: Shape mismatch for count. Overall: {overall[key]['count'].shape if overall[key]['count'] is not None else 'None'}, New: {count_val.shape}. Skipping.")
         if task_had_valid_level:
             valid_task_count += 1
 
     logging.debug(f"--- Finished Combining Results. Processed {valid_task_count}/{len(task_results)} valid tasks. ---")
-    for lev_val in levels: # Final NaN fill for levels that might have had lat/lon but no sums
+    for lev_val in levels:
         key = str(lev_val)
         if overall[key].get('lat') is not None and overall[key].get('lon') is not None:
             final_shape = (len(overall[key]['lat']), len(overall[key]['lon']))
-            # Ensure count is also initialized if sums are being filled (should be done earlier though)
             if overall[key].get('count') is None:
                  logging.debug(f"  Final combined count L{lev_val} is None. Filling with zeros.")
-                 overall[key]['count'] = np.zeros(final_shape, dtype=np.int32) # Default to 0 if somehow missed
+                 overall[key]['count'] = np.zeros(final_shape, dtype=np.int32)
 
             for var in ALL_VARS_TO_SAVE:
                 if overall[key].get(f"{var}_sum") is None:
@@ -437,15 +400,12 @@ def combine_tasks_results(task_results: List[Dict], levels: List[int]) -> Dict[s
                 if overall[key].get(f"{var}_clim_sum") is None:
                     logging.debug(f"  Final combined {var}_clim_sum L{lev_val} is None. Filling with NaN.")
                     overall[key][f"{var}_clim_sum"] = np.full(final_shape, np.nan, dtype=np.float64)
-        else: # No lat/lon for this level at all, means no data.
-             logging.warning(f"  No valid lat/lon found after combining tasks for L{lev_val}. All sums for this level remain None.")
-
+        else:
+             logging.warning(f"  No valid lat/lon found after combining tasks for L{lev_val}.")
     return overall
 
 
 # --- NetCDF Saving Functions ---
-# No changes needed in save_composites_to_netcdf, as it generically handles all variables
-# in ALL_VARS_TO_SAVE for mean calculation and attribute setting.
 def save_composites_to_netcdf(results_wt: Dict, weather_types: List, months: List[int],
                               time_offsets: List[int], levels: List[int],
                               lat: np.ndarray, lon: np.ndarray,
@@ -470,23 +430,19 @@ def save_composites_to_netcdf(results_wt: Dict, weather_types: List, months: Lis
             for oi, off in enumerate(time_offsets):
                 comp_month_data = results_wt.get(wt, {}).get(off, {}).get(m_val, None)
                 if comp_month_data is None:
-                    # logging.debug(f"  WT={wt}, M={m_val}, Off={off}h: No data for this group.")
                     continue
                 for li, lev_val in enumerate(levels):
                     key = str(lev_val)
-                    group_label = f"WT={wt}, M={m_val}, Off={off}h, L={lev_val}hPa"
+                    group_label = f"WT={wt}, M={m_val}, Off={off}h, L={lev_val}hPa" # For logging
                     comp_level_data = comp_month_data.get(key)
                     if comp_level_data is None:
-                        # logging.debug(f"  {group_label}: No combined data for level.")
                         continue
 
                     count_arr = comp_level_data.get('count')
                     if count_arr is None or count_arr.size == 0 or np.all(count_arr == 0):
-                        # logging.debug(f"  {group_label}: Combined count is zero or None.")
                         continue
                     
                     comp_arrays_count_grid[wi,mi,oi,li,:,:] = count_arr
-                    # logging.debug(f"  {group_label}: Count max = {np.max(count_arr)}")
 
                     for var in ALL_VARS_TO_SAVE:
                         for sum_type_suffix, mean_array_target in [("_sum", comp_arrays_mean[var]),
@@ -497,13 +453,6 @@ def save_composites_to_netcdf(results_wt: Dict, weather_types: List, months: Lis
                                 with np.errstate(divide='ignore', invalid='ignore'): 
                                     mean_val = var_sum_val / count_arr
                                 mean_array_target[wi,mi,oi,li,:,:] = np.where(count_arr > 0, mean_val, np.nan)
-                                # Optional: detailed logging per variable can be verbose
-                                # if sum_type_suffix == "_sum":
-                                #     logging.debug(f"    {var}_mean calculated. Max: {np.nanmax(mean_val):.2f if np.any(np.isfinite(mean_val)) else 'NaN'}")
-                                # else:
-                                #     logging.debug(f"    {var}_clim_mean calculated. Max: {np.nanmax(mean_val):.2f if np.any(np.isfinite(mean_val)) else 'NaN'}")
-                            # else:
-                                # logging.debug(f"    {sum_type_key} was None for {group_label}.")
     
     logging.debug("Creating xarray Dataset...")
     ds_vars = {}
@@ -519,7 +468,7 @@ def save_composites_to_netcdf(results_wt: Dict, weather_types: List, months: Lis
 
     ds = xr.Dataset(ds_vars)
     ds.attrs["description"] = (f"JJA ERA5 composites for pressure-level variables for MCS environments, "
-                               f"stratified by weather type. Theta_e for events calculated per timestep. "
+                               f"stratified by weather type. Theta_e for events calculated per timestep using calc_atmospheric_variables.py. "
                                f"Climatology for theta_e loaded from pre-calculated file. "
                                f"Climatology based on JJA for period '{period_details['name_in_file']}' ({period_details['start']}-{period_details['end']}).")
     ds.attrs["history"] = f"Created by composite_pressure_levels.py on {pd.Timestamp.now(tz='UTC').strftime('%Y-%m-%d %H:%M:%S %Z')}"
@@ -538,8 +487,7 @@ def save_composites_to_netcdf(results_wt: Dict, weather_types: List, months: Lis
 # --- Main Script ---
 def main():
     parser = argparse.ArgumentParser(
-        description="Compute JJA monthly ERA5 pressure level composites. Theta_e for events calculated per timestep. Theta_e climatology loaded from file.")
-    # ... (Argument parsing remains the same)
+        description="Compute JJA monthly ERA5 pressure level composites. Theta_e for events calculated per timestep via external module. Theta_e climatology loaded from file.")
     parser.add_argument("--era5_dir", type=Path, default='/data/reloclim/normal/INTERACT/ERA5/pressure_levels/',
                         help="Directory containing ERA5 monthly files (e.g., 2005-08_NA.nc)")
     parser.add_argument("--clim_base_dir", type=Path, default="/home/dkn/climatology/ERA5/",
@@ -551,7 +499,7 @@ def main():
     parser.add_argument("--levels", type=str, default="250,500,850",
                         help="Comma-separated pressure levels in hPa (e.g., 250,500,850)")
     parser.add_argument("--region", type=str, required=True,
-                        help="Subregion name, used to find CSV file (e.g., southern_alps)")
+                        help="Subregion name, used to find CSV file (e.g., Alps)")
     parser.add_argument("--output_dir", type=Path, default='/home/dkn/composites/ERA5/',
                         help="Directory to save output composite netCDF files")
     parser.add_argument("--ncores", type=int, default=32, help="Number of cores for parallel processing")
@@ -573,7 +521,7 @@ def main():
         ],
         force=True
     )
-    logging.info("--- Starting Pressure Level Composite Script (Theta_e event calc, Theta_e clim loaded) ---")
+    logging.info("--- Starting Pressure Level Composite Script (Theta_e event calc via module, Theta_e clim loaded) ---")
     logging.info(f"Run arguments: {args}")
     logging.info(f"Logging output to: {log_filename}")
 
@@ -594,7 +542,6 @@ def main():
 
     clim_files_to_load = []
     clim_base_var_dir = args.clim_base_dir
-    # Now CLIM_VARS_TO_LOAD includes 'theta_e'
     logging.info(f"Attempting to load climatology files for variables: {CLIM_VARS_TO_LOAD}")
     for var in CLIM_VARS_TO_LOAD: 
         fname = f"era5_plev_{var}_clim_may_sep_{clim_period_name_in_file}_{clim_start_year_period}-{clim_end_year_period}.nc"
@@ -623,7 +570,6 @@ def main():
     if not {'month', 'hour', 'level'}.issubset(clim_ds.dims):
         raise ValueError("Merged climatology must have 'month', 'hour', 'level' dimensions.")
     
-    # Check that all expected climatology variables are present in the merged dataset
     missing_vars_in_clim = [v for v in CLIM_VARS_TO_LOAD if v not in clim_ds]
     if missing_vars_in_clim:
         raise ValueError(f"Variables {missing_vars_in_clim} not found in merged climatology dataset. Ensure all files (including for theta_e) were loaded correctly.")
@@ -635,7 +581,6 @@ def main():
     
     for ds_item in datasets_to_merge: ds_item.close()
 
-    # ... (Rest of the main function remains largely the same as the previous version) ...
     base_col = "datetime" if args.noMCS else 'time_0h'
     df_all = pd.read_csv(comp_csv_file, parse_dates=[base_col])
     df_all[base_col] = df_all[base_col].dt.round("H")
@@ -754,10 +699,10 @@ def main():
     logging.info("--- Post-processing and Saving Results ---")
     lat_coords, lon_coords = None, None 
     found_coords = False
-    for wt_chk in weather_types_to_process: # Iterate through WTs
-        for off_chk in time_offsets_parsed: # Iterate through offsets
-             for m_chk in months_to_process_for_output: # Iterate through months
-                  for lev_chk in levels_parsed: # Iterate through levels
+    for wt_chk in weather_types_to_process:
+        for off_chk in time_offsets_parsed:
+             for m_chk in months_to_process_for_output:
+                  for lev_chk in levels_parsed:
                       sample_comp = results_wt.get(wt_chk,{}).get(off_chk,{}).get(m_chk,{}).get(str(lev_chk),None)
                       if sample_comp and sample_comp.get('lat') is not None and sample_comp.get('lon') is not None:
                           lat_coords = sample_comp['lat']; lon_coords = sample_comp['lon']
@@ -766,7 +711,7 @@ def main():
              if found_coords: break
         if found_coords: break
     
-    if not found_coords: # If no coords found in results, try from climatology dataset
+    if not found_coords:
         logging.warning("Could not find valid lat/lon in any processed composite. Trying clim_ds for coords.")
         if clim_ds is not None and 'latitude' in clim_ds and 'longitude' in clim_ds:
             lat_coords = clim_ds['latitude'].values; lon_coords = clim_ds['longitude'].values
@@ -777,7 +722,7 @@ def main():
     if lat_coords is None or lon_coords is None: 
         raise ValueError("Lat/lon coordinate information is missing. Cannot save output file.")
 
-    output_file_name_suffix = "_nomcs.nc" if args.noMCS else ".nc" # Adjusted suffix logic
+    output_file_name_suffix = "_nomcs.nc" if args.noMCS else ".nc"
     output_file_comp = args.output_dir / f"composite_plev_{args.region}_wt_clim_{args.period}{output_file_name_suffix}"
     
     save_composites_to_netcdf(results_wt, weather_types_to_process, months_to_process_for_output,
