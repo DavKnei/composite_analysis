@@ -8,7 +8,7 @@ TARGET_DIR = "/home/dkn/composites/ERA5"
 # Define the list of regions
 # Ensure "eastern_alps" is included if it's one of your target regions,
 # as it appears in your example filenames.
-regions = ["eastern_alps", "southern_alps", "western_alps", "dinaric_alps"]
+regions = ["Alps", "Balcan", "Eastern_Europe", "France"]
 
 # Loop over each region
 for region in regions:
@@ -24,7 +24,7 @@ for region in regions:
             "desc": "Filter composite times"
         },
         {
-            "command": ["python", "04_get_nomcs_datetimes.py", "--region", region],
+            "command": ["python", "04_get_nomcs_composite_times.py", "--region", region],
             "desc": "Get noMCS datetimes"
         }
     ]
@@ -73,7 +73,7 @@ for region in regions:
             "args": [],
             # Note: Based on 'composite_surface_eastern_alps_precipitation_wt.nc'.
             # If your script produces '..._wt_evaluation.nc', adjust pattern below.
-            "output_file_pattern": "composite_surface_{region}_precipitation_wt.nc",
+            "output_file_pattern": "composite_surface_{region}_precipitation_wt_evaluation.nc",
             # Alternative: "composite_surface_{region}_precipitation_wt_evaluation.nc",
         },
         {
