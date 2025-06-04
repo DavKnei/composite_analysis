@@ -223,7 +223,7 @@ def main() -> None:
     )
     p.add_argument(
         "--data_var",
-        required=True,
+        default="z500",
         help="variable name in NetCDF (e.g. z500, msl, z850)",
     )
     p.add_argument(
@@ -278,7 +278,7 @@ def main() -> None:
         da_full = da_full.astype(np.float32)
 
     # Define regions to process
-    regions_to_process = ["Alps"]
+    regions_to_process = ["Alps", "Balcan", "Eastern_Europe", "France"]
 
     for region in regions_to_process:
         print(f"\n--- Processing region: {region} ---")
