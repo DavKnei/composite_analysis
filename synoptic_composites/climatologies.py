@@ -211,15 +211,17 @@ def generate_yearly_monthly_hourly_mean(
     """
     Calculates monthly-hourly means for a given variable in an input dataset for a single year.
     Saves the result to a NetCDF file.
+    Assumes calling code has already checked if the output file exists if preliminary computation
+    (like data loading) is to be skipped. This function's internal check is a final safeguard.
     """
-    logging.info(f"  Generating May-Sep monthly-hourly mean for {output_file_prefix} (var: {variable_name}), year {year}...")
     # Construct output filename using the prefix which already contains var type and name
     output_yearly_file = output_dir_for_var / f"{output_file_prefix}_{year}_may_sep_monthly_hourly.nc"
 
-    if output_yearly_file.exists():
-        logging.info(f"  Yearly climatology {output_yearly_file.name} already exists. Skipping.")
+    if output_yearly_file.exists(): # Safeguard check
+        logging.info(f"  Yearly climatology {output_yearly_file.name} (checked inside generate_yearly_monthly_hourly_mean) already exists. Skipping generation step.")
         return
 
+    logging.info(f"  Generating May-Sep monthly-hourly mean for {output_file_prefix} (var: {variable_name}), year {year}...")
     if variable_name not in input_ds.data_vars:
         logging.error(f"  Variable '{variable_name}' not in provided input_ds for {output_file_prefix}, year {year}. Skipping.")
         return
@@ -271,8 +273,6 @@ def generate_yearly_monthly_hourly_mean(
 
 
 # --- Part 2: Function to average yearly climatologies for a specific period ---
-# This function remains largely the same as in the original file
-# but will be called with theta_e as a variable too.
 def average_yearly_climatologies_for_period(
     input_dir_yearly_var: Path, # e.g. .../plev/z/
     glob_pattern_yearly: str,
@@ -281,9 +281,9 @@ def average_yearly_climatologies_for_period(
     start_year_period: int,
     end_year_period: int
 ):
-    # Check if the final output file already exists
+    # Check if the final output file already exists BEFORE any calculation for this period average
     if output_final_file.exists():
-        logging.info(f"Final climatology {output_final_file.name} already exists. Skipping.")
+        logging.info(f"Final climatology {output_final_file.name} already exists. Skipping all processing for this period average.")
         return
 
     logging.info(f"Averaging yearly May-Sep climatologies for PERIOD: {period_name} ({start_year_period}-{end_year_period})")
@@ -293,13 +293,9 @@ def average_yearly_climatologies_for_period(
     files_for_period = []
     for fpath in all_yearly_files:
         try:
-            # Extract year from filename, e.g., plev_z_1996_may_sep_monthly_hourly.nc
-            # Example: plev_theta_e_1991_may_sep_monthly_hourly.nc -> parts: plev, theta, e, 1991, ...
-            # A more robust way might be to use regex if filename parts vary.
-            # Assuming format: prefix_YYYY_may_sep_monthly_hourly.nc
             filename_parts = fpath.name.split('_')
             year_str = ""
-            for part in reversed(filename_parts): # Search for year from the end
+            for part in reversed(filename_parts):
                 if part.isdigit() and len(part) == 4:
                     year_str = part
                     break
@@ -319,10 +315,9 @@ def average_yearly_climatologies_for_period(
     logging.info(f"  Found {len(files_for_period)} yearly files for period {period_name} to average.")
 
     try:
-        # It's crucial that yearly files have consistent coordinates for month, hour, level etc.
         with xr.open_mfdataset(files_for_period, concat_dim="year", combine="nested",
                                chunks={'month': 'auto', 'hour': 'auto', 'level': 'auto'},
-                               decode_times=False) as ds_period_years: # decode_times=False if 'year' coord is simple int
+                               decode_times=False) as ds_period_years:
 
             logging.info(f"  Calculating final mean across years for period {period_name}...")
             with ProgressBar():
@@ -332,12 +327,11 @@ def average_yearly_climatologies_for_period(
             final_climatology.attrs['months_included'] = "May, June, July, August, September"
             final_climatology.attrs['source_processing_method'] = "Yearly incremental averaging (May-Sep)"
             final_climatology.attrs['history'] = f"Created by climatologies.py on {pd.Timestamp.now(tz='UTC').strftime('%Y-%m-%d %H:%M:%S %Z')}"
-            try: # Copy attributes from a sample yearly file
+            try:
                 with xr.open_dataset(files_for_period[0]) as sample_ds:
                     for var_name_attr in final_climatology.data_vars:
                         if var_name_attr in sample_ds.data_vars:
                             final_climatology[var_name_attr].attrs = sample_ds[var_name_attr].attrs.copy()
-                            # Update long_name to reflect it's a climatological mean
                             orig_long_name = sample_ds[var_name_attr].attrs.get('long_name', var_name_attr)
                             final_climatology[var_name_attr].attrs['long_name'] = f"Climatological mean (May-Sep, {period_name}) of {orig_long_name}"
             except Exception as e_attr:
@@ -362,10 +356,10 @@ if __name__ == "__main__":
                         help="Directory containing raw ERA5 surface files")
     parser.add_argument("--output_dir", type=Path, default="/home/dkn/climatology/ERA5/",
                         help="Base directory to save the output climatology NetCDF files")
-    parser.add_argument("--ncores", type=int, default=4, # Default from original
+    parser.add_argument("--ncores", type=int, default=4,
                         help="Number of cores for dask parallel processing (threads scheduler)")
     parser.add_argument("--part", type=str, default="both", choices=['clim', 'clim_mean', 'both'],
-                        help="Specify which part of the script to run: 'part1' (yearly files), 'part2' (final period means), or 'both'.")
+                        help="Specify which part of the script to run: 'clim' (yearly files), 'clim_mean' (final period means), or 'both'.")
     args = parser.parse_args()
 
     dask.config.set(scheduler='threads', num_workers=args.ncores)
@@ -383,6 +377,16 @@ if __name__ == "__main__":
             if PLEV_VARS_RAW:
                 logging.info(f"-- Processing RAW PLEV variables for year {year_to_process} --")
                 for var_name in PLEV_VARS_RAW:
+                    output_dir_for_var = output_dir_yearly_base / "plev" / var_name
+                    output_file_prefix = f"plev_{var_name}"
+                    potential_yearly_file = output_dir_for_var / f"{output_file_prefix}_{year_to_process}_may_sep_monthly_hourly.nc"
+
+                    if potential_yearly_file.exists():
+                        logging.info(f"  Yearly climatology {potential_yearly_file.name} already exists. Skipping ALL processing for this file.")
+                        continue # Skip to the next raw plev variable
+
+                    # File does not exist, proceed with loading and generation
+                    logging.info(f"  Preparing to generate: {potential_yearly_file.name}")
                     yearly_raw_var_ds = load_era5_data_for_year(
                         data_dir=args.plev_dir,
                         file_pattern_template=PLEV_PATTERN,
@@ -390,55 +394,71 @@ if __name__ == "__main__":
                         year=year_to_process
                     )
                     if yearly_raw_var_ds:
-                        output_dir_for_var = output_dir_yearly_base / "plev" / var_name
                         generate_yearly_monthly_hourly_mean(
                             input_ds=yearly_raw_var_ds,
                             variable_name=var_name,
                             year=year_to_process,
                             output_dir_for_var=output_dir_for_var,
-                            output_file_prefix=f"plev_{var_name}"
+                            output_file_prefix=output_file_prefix
                         )
                         yearly_raw_var_ds.close()
                     else:
-                        logging.warning(f"Skipping yearly climatology for {var_name}, year {year_to_process} due to load failure.")
+                        logging.warning(f"  Load failed for {var_name}, year {year_to_process}. Skipping yearly climatology generation (file {potential_yearly_file.name} was intended).")
 
             # --- Process DERIVED PLEV variables (theta_e) ---
             if PLEV_VARS_DERIVED_FOR_CLIM:
-                logging.info(f"-- Processing DERIVED PLEV variables for year {year_to_process} --")
-                # For theta_e, we need 't' and 'q'
-                tq_data_for_year = load_era5_data_for_year(
-                    data_dir=args.plev_dir,
-                    file_pattern_template=PLEV_PATTERN,
-                    variables_to_load=['t', 'q'], # Load t and q together
-                    year=year_to_process
-                )
+                for var_name_derived in PLEV_VARS_DERIVED_FOR_CLIM: # Loop allows for future derived vars
+                    if var_name_derived == 'theta_e':
+                        output_dir_for_theta_e = output_dir_yearly_base / "plev" / var_name_derived
+                        output_file_prefix_theta_e = f"plev_{var_name_derived}"
+                        potential_yearly_theta_e_file = output_dir_for_theta_e / f"{output_file_prefix_theta_e}_{year_to_process}_may_sep_monthly_hourly.nc"
 
-                if tq_data_for_year and 't' in tq_data_for_year and 'q' in tq_data_for_year:
-                    logging.info(f"  Calculating instantaneous theta_e for year {year_to_process}...")
-                    theta_e_instantaneous_ds = calculate_theta_e_on_levels(tq_data_for_year.compute())  # Make sure to not give a dask array to the theta_e calculation
-                    tq_data_for_year.close()
+                        if potential_yearly_theta_e_file.exists():
+                            logging.info(f"  Yearly climatology {potential_yearly_theta_e_file.name} already exists. Skipping ALL processing for this file.")
+                            continue # Skip to the next derived variable
 
-                    if theta_e_instantaneous_ds and 'theta_e' in theta_e_instantaneous_ds:
-                        var_name_theta_e = 'theta_e'
-                        output_dir_for_theta_e = output_dir_yearly_base / "plev" / var_name_theta_e
-                        generate_yearly_monthly_hourly_mean(
-                            input_ds=theta_e_instantaneous_ds,
-                            variable_name=var_name_theta_e,
-                            year=year_to_process,
-                            output_dir_for_var=output_dir_for_theta_e,
-                            output_file_prefix=f"plev_{var_name_theta_e}"
+                        logging.info(f"-- Processing DERIVED PLEV variable {var_name_derived} for year {year_to_process} (Output: {potential_yearly_theta_e_file.name}) --")
+                        tq_data_for_year = load_era5_data_for_year(
+                            data_dir=args.plev_dir,
+                            file_pattern_template=PLEV_PATTERN,
+                            variables_to_load=['t', 'q'],
+                            year=year_to_process
                         )
-                        theta_e_instantaneous_ds.close()
-                    else:
-                        logging.warning(f"  Theta_e calculation failed or yielded no data for year {year_to_process}.")
-                else:
-                    logging.warning(f"  Could not load 't' and 'q' data for year {year_to_process} to calculate theta_e. Skipping theta_e for this year.")
-                    if tq_data_for_year: tq_data_for_year.close()
+
+                        if tq_data_for_year and 't' in tq_data_for_year and 'q' in tq_data_for_year:
+                            logging.info(f"  Calculating instantaneous {var_name_derived} for year {year_to_process}...")
+                            theta_e_instantaneous_ds = calculate_theta_e_on_levels(tq_data_for_year.compute())
+                            tq_data_for_year.close()
+
+                            if theta_e_instantaneous_ds and var_name_derived in theta_e_instantaneous_ds:
+                                generate_yearly_monthly_hourly_mean(
+                                    input_ds=theta_e_instantaneous_ds,
+                                    variable_name=var_name_derived,
+                                    year=year_to_process,
+                                    output_dir_for_var=output_dir_for_theta_e,
+                                    output_file_prefix=output_file_prefix_theta_e
+                                )
+                                theta_e_instantaneous_ds.close()
+                            else:
+                                logging.warning(f"  {var_name_derived} calculation failed or yielded no data for year {year_to_process}. Output {potential_yearly_theta_e_file.name} will not be generated.")
+                        else:
+                            logging.warning(f"  Could not load 't' and 'q' data for year {year_to_process} to calculate {var_name_derived}. Output {potential_yearly_theta_e_file.name} will not be generated.")
+                            if tq_data_for_year: tq_data_for_year.close()
+                    # else: handle other derived variables if any
 
             # --- Process SURF variables ---
             if SURF_VARS:
                 logging.info(f"-- Processing SURF variables for year {year_to_process} --")
                 for var_name in SURF_VARS:
+                    output_dir_for_var = output_dir_yearly_base / "surf" / var_name
+                    output_file_prefix = f"surf_{var_name}"
+                    potential_yearly_file = output_dir_for_var / f"{output_file_prefix}_{year_to_process}_may_sep_monthly_hourly.nc"
+
+                    if potential_yearly_file.exists():
+                        logging.info(f"  Yearly climatology {potential_yearly_file.name} already exists. Skipping ALL processing for this file.")
+                        continue # Skip to the next surf variable
+
+                    logging.info(f"  Preparing to generate: {potential_yearly_file.name}")
                     yearly_surf_var_ds = load_era5_data_for_year(
                         data_dir=args.surf_dir,
                         file_pattern_template=SURF_PATTERN,
@@ -446,17 +466,16 @@ if __name__ == "__main__":
                         year=year_to_process
                     )
                     if yearly_surf_var_ds:
-                        output_dir_for_var = output_dir_yearly_base / "surf" / var_name
                         generate_yearly_monthly_hourly_mean(
                             input_ds=yearly_surf_var_ds,
                             variable_name=var_name,
                             year=year_to_process,
                             output_dir_for_var=output_dir_for_var,
-                            output_file_prefix=f"surf_{var_name}"
+                            output_file_prefix=output_file_prefix
                         )
                         yearly_surf_var_ds.close()
                     else:
-                        logging.warning(f"Skipping yearly climatology for SURF {var_name}, year {year_to_process} due to load failure.")
+                        logging.warning(f"  Load failed for SURF {var_name}, year {year_to_process}. Skipping yearly climatology generation (file {potential_yearly_file.name} was intended).")
         logging.info(f"--- All yearly May-Sep climatology calculations ({INTERMEDIATE_START_YEAR}-{INTERMEDIATE_END_YEAR}) finished. ---")
 
     if args.part in ["clim_mean", "both"]:
@@ -465,24 +484,23 @@ if __name__ == "__main__":
             start_p, end_p = period_details["start"], period_details["end"]
             logging.info(f"--- Processing final climatology for PERIOD: {period_name} ({start_p}-{end_p}) ---")
 
-            # Average PLEV variables (now includes theta_e)
-            if PLEV_VARS_ALL_FOR_CLIM: # Use the list that includes raw and derived (theta_e)
+            if PLEV_VARS_ALL_FOR_CLIM:
                 for var_name in PLEV_VARS_ALL_FOR_CLIM:
-                    logging.info(f"-- Averaging yearly May-Sep files for PLEV variable: {var_name}, Period: {period_name} --")
+                    # Logging for which variable and period is being considered happens before the function call
+                    logging.info(f"-- Considering PLEV variable: {var_name}, Period: {period_name} --")
                     input_dir_for_var_avg = output_dir_yearly_base / "plev" / var_name
                     output_final_plev_file = args.output_dir / f"era5_plev_{var_name}_clim_may_sep_{period_name}_{start_p}-{end_p}.nc"
                     average_yearly_climatologies_for_period(
                         input_dir_yearly_var=input_dir_for_var_avg,
-                        glob_pattern_yearly=f"plev_{var_name}_*_may_sep_monthly_hourly.nc", # Should match theta_e files too
+                        glob_pattern_yearly=f"plev_{var_name}_*_may_sep_monthly_hourly.nc",
                         output_final_file=output_final_plev_file,
                         period_name=period_name,
                         start_year_period=start_p,
                         end_year_period=end_p
                     )
-            # Average SURF variables
             if SURF_VARS:
                 for var_name in SURF_VARS:
-                    logging.info(f"-- Averaging yearly May-Sep files for SURF variable: {var_name}, Period: {period_name} --")
+                    logging.info(f"-- Considering SURF variable: {var_name}, Period: {period_name} --")
                     input_dir_for_var_avg = output_dir_yearly_base / "surf" / var_name
                     output_final_surf_file = args.output_dir / f"era5_surf_{var_name}_clim_may_sep_{period_name}_{start_p}-{end_p}.nc"
                     average_yearly_climatologies_for_period(
@@ -495,6 +513,10 @@ if __name__ == "__main__":
                     )
         logging.info("--- Yearly Climatology averaging finished. ---")
 
-    if args.part not in ["clim", "clim_mean", "both"]: # Adjusted to match choices for clarity, though original would also work with current setup.
-        print(f"--part argument must be one of {parser.get_default('part')}, actual: {args.part}")
+    if args.part not in ["clim", "clim_mean", "both"]:
+        # Using f-string for choices to dynamically show them from parser, if possible, or list them.
+        valid_choices = parser.get_default('part') # This would actually get the default, not choices.
+                                                   # Let's list them explicitly for clarity as in previous version.
+        valid_choices_list = ['clim', 'clim_mean', 'both']
+        logging.error(f"--part argument must be one of {valid_choices_list}, but was '{args.part}'")
         sys.exit(1)
