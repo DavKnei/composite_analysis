@@ -52,15 +52,15 @@ PLEV_PATTERN = "{year}-{month:02d}_NA.nc"
 SURF_PATTERN = "slp_{year}_NA.nc" # Assumed to be annual files for surface
 
 # Domain for consistency
-DOMAIN_LAT_MIN, DOMAIN_LAT_MAX = 25, 65 
-DOMAIN_LON_MIN, DOMAIN_LON_MAX = -20, 43 
+DOMAIN_LAT_MIN, DOMAIN_LAT_MAX = 25, 65
+DOMAIN_LON_MIN, DOMAIN_LON_MAX = -20, 43
 
 # Months to process (May to September)
 MONTHS_TO_PROCESS = list(range(5, 10))
 
 # Overall year range for generating intermediate files
 INTERMEDIATE_START_YEAR = 1991
-INTERMEDIATE_END_YEAR = 2020 
+INTERMEDIATE_END_YEAR = 2020
 
 # Definitions for final climatology periods
 PERIODS = {
@@ -80,7 +80,7 @@ def reorder_lat(ds: xr.Dataset) -> xr.Dataset:
         ds = ds.reindex({lat_coord_name: sorted_lat_values})
     return ds
 
-def fix_lat_lon_names(ds: xr.Dataset) -> xr.Dataset: 
+def fix_lat_lon_names(ds: xr.Dataset) -> xr.Dataset:
     """Ensure standard 'latitude' and 'longitude' coordinate names."""
     rename_dict = {}
     if 'lat' in ds.coords and 'latitude' not in ds.coords:
@@ -93,8 +93,8 @@ def fix_lat_lon_names(ds: xr.Dataset) -> xr.Dataset:
 
 def preprocess_era5(ds: xr.Dataset) -> xr.Dataset: # Modified from original file
     """Apply standard preprocessing: fix coords, reorder lat, select domain."""
-    ds = fix_lat_lon_names(ds) 
-    ds = reorder_lat(ds) 
+    ds = fix_lat_lon_names(ds)
+    ds = reorder_lat(ds)
     lat_coord_name = 'latitude' if 'latitude' in ds.coords else 'lat'
     lon_coord_name = 'longitude' if 'longitude' in ds.coords else 'lon'
 
@@ -109,7 +109,7 @@ def preprocess_era5(ds: xr.Dataset) -> xr.Dataset: # Modified from original file
     if 'time' in ds.coords and ds['time'].dtype != 'datetime64[ns]': # From original file
         try:
             logging.debug("Attempting to convert time coordinate to datetime64[ns]")
-            if hasattr(ds['time'].values[0], 'strftime'): 
+            if hasattr(ds['time'].values[0], 'strftime'):
                  times_pd = ds.indexes['time'].to_datetimeindex(unsafe=True)
                  ds['time'] = ("time", times_pd.values, ds.time.attrs)
             else:
@@ -151,7 +151,7 @@ def load_era5_data_for_year(
     else:
         logging.error(f"Invalid file_pattern_template for loading: {file_pattern_template}")
         return None
-        
+
     if not paths_for_year_months:
         logging.warning(f"No input files found for variables {variables_to_load}, year {year}, months {MONTHS_TO_PROCESS}. Cannot load.")
         return None
@@ -163,14 +163,14 @@ def load_era5_data_for_year(
         try:
             with xr.open_dataset(p_str, chunks={'time': 'auto'}, decode_times=False) as ds_single_raw: # Changed chunk to auto
                 ds_single = xr.decode_cf(ds_single_raw, decode_times=True)
-                
+
                 # If the input file is annual, select only May-Sep here
                 if "{month:02d}" not in file_pattern_template: # i.e., it's an annual file
                     ds_single = ds_single.sel(time=ds_single.time.dt.month.isin(MONTHS_TO_PROCESS))
                     if ds_single.time.size == 0:
                         logging.debug(f"No May-Sep data in annual file {p_str} for year {year}. Skipping this file instance.")
                         continue
-                
+
                 # Select only the variables needed for this load, if they exist in the file
                 vars_in_file_to_load = [v for v in variables_to_load if v in ds_single.data_vars]
                 if not vars_in_file_to_load:
@@ -242,7 +242,7 @@ def generate_yearly_monthly_hourly_mean(
             climatology_year = ds_to_process.astype(np.float32).groupby('time.month').apply(
                 lambda x: x.groupby('time.hour').mean(dim='time', skipna=True)
             ).compute()
-        
+
         # Validate months if needed
         expected_months_dataarray = xr.DataArray(MONTHS_TO_PROCESS, dims='month', name='month')
         if not climatology_year.month.equals(expected_months_dataarray):
@@ -251,7 +251,7 @@ def generate_yearly_monthly_hourly_mean(
 
         climatology_year = climatology_year.assign_coords(year=year)
         climatology_year = climatology_year.expand_dims('year')
-        
+
         # Add attributes from the original variable if possible (e.g., from input_ds)
         if variable_name in input_ds:
             climatology_year[variable_name].attrs = input_ds[variable_name].attrs.copy()
@@ -275,12 +275,17 @@ def generate_yearly_monthly_hourly_mean(
 # but will be called with theta_e as a variable too.
 def average_yearly_climatologies_for_period(
     input_dir_yearly_var: Path, # e.g. .../plev/z/
-    glob_pattern_yearly: str, 
+    glob_pattern_yearly: str,
     output_final_file: Path,
     period_name: str,
     start_year_period: int,
     end_year_period: int
 ):
+    # Check if the final output file already exists
+    if output_final_file.exists():
+        logging.info(f"Final climatology {output_final_file.name} already exists. Skipping.")
+        return
+
     logging.info(f"Averaging yearly May-Sep climatologies for PERIOD: {period_name} ({start_year_period}-{end_year_period})")
     logging.info(f"  Source dir for averaging: {input_dir_yearly_var} using pattern {glob_pattern_yearly}")
 
@@ -359,7 +364,7 @@ if __name__ == "__main__":
                         help="Base directory to save the output climatology NetCDF files")
     parser.add_argument("--ncores", type=int, default=4, # Default from original
                         help="Number of cores for dask parallel processing (threads scheduler)")
-    parser.add_argument("--part", type=str, default="both", choices=['clim', 'clim_mean', 'both'], 
+    parser.add_argument("--part", type=str, default="both", choices=['clim', 'clim_mean', 'both'],
                         help="Specify which part of the script to run: 'part1' (yearly files), 'part2' (final period means), or 'both'.")
     args = parser.parse_args()
 
@@ -373,7 +378,7 @@ if __name__ == "__main__":
         logging.info(f"--- PART 1: Generating Yearly May-Sep Climatologies ({INTERMEDIATE_START_YEAR}-{INTERMEDIATE_END_YEAR}) ---")
         for year_to_process in range(INTERMEDIATE_START_YEAR, INTERMEDIATE_END_YEAR + 1):
             logging.info(f"===== Processing Year: {year_to_process} =====")
-            
+
             # --- Process RAW PLEV variables ---
             if PLEV_VARS_RAW:
                 logging.info(f"-- Processing RAW PLEV variables for year {year_to_process} --")
@@ -396,7 +401,7 @@ if __name__ == "__main__":
                         yearly_raw_var_ds.close()
                     else:
                         logging.warning(f"Skipping yearly climatology for {var_name}, year {year_to_process} due to load failure.")
-            
+
             # --- Process DERIVED PLEV variables (theta_e) ---
             if PLEV_VARS_DERIVED_FOR_CLIM:
                 logging.info(f"-- Processing DERIVED PLEV variables for year {year_to_process} --")
@@ -411,7 +416,7 @@ if __name__ == "__main__":
                 if tq_data_for_year and 't' in tq_data_for_year and 'q' in tq_data_for_year:
                     logging.info(f"  Calculating instantaneous theta_e for year {year_to_process}...")
                     theta_e_instantaneous_ds = calculate_theta_e_on_levels(tq_data_for_year.compute())  # Make sure to not give a dask array to the theta_e calculation
-                    tq_data_for_year.close() 
+                    tq_data_for_year.close()
 
                     if theta_e_instantaneous_ds and 'theta_e' in theta_e_instantaneous_ds:
                         var_name_theta_e = 'theta_e'
@@ -436,7 +441,7 @@ if __name__ == "__main__":
                 for var_name in SURF_VARS:
                     yearly_surf_var_ds = load_era5_data_for_year(
                         data_dir=args.surf_dir,
-                        file_pattern_template=SURF_PATTERN, 
+                        file_pattern_template=SURF_PATTERN,
                         variables_to_load=[var_name],
                         year=year_to_process
                     )
@@ -489,7 +494,7 @@ if __name__ == "__main__":
                         end_year_period=end_p
                     )
         logging.info("--- Yearly Climatology averaging finished. ---")
-    
-    if args.part not in ["part1", "part2", "both"]:
-        print("--part argument must be 'part1', 'part2', or 'both'")
+
+    if args.part not in ["clim", "clim_mean", "both"]: # Adjusted to match choices for clarity, though original would also work with current setup.
+        print(f"--part argument must be one of {parser.get_default('part')}, actual: {args.part}")
         sys.exit(1)
