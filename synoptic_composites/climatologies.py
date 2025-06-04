@@ -45,11 +45,11 @@ PLEV_VARS_RAW = ['z', 't', 'q', 'u', 'v', 'w']  # Raw variables from ERA5 plev f
 PLEV_VARS_DERIVED_FOR_CLIM = ['theta_e']      # Derived variables for climatology
 PLEV_VARS_ALL_FOR_CLIM = PLEV_VARS_RAW + PLEV_VARS_DERIVED_FOR_CLIM # All plev vars for final clim
 
-SURF_VARS = ['tp'] # Surface variables
+SURF_VARS = ['msl'] # Surface variables
 
 # Filename patterns
 PLEV_PATTERN = "{year}-{month:02d}_NA.nc"
-SURF_PATTERN = "{year}_NA.nc" # Assumed to be annual files for surface
+SURF_PATTERN = "slp_{year}_NA.nc" # Assumed to be annual files for surface
 
 # Domain for consistency
 DOMAIN_LAT_MIN, DOMAIN_LAT_MAX = 25, 65 
