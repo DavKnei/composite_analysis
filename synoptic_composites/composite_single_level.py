@@ -150,18 +150,26 @@ def apply_scale_separation(ds_derived: xr.Dataset) -> (xr.Dataset, xr.Dataset):
         for t_step in original_da.time:
             time_slice = original_da.sel(time=t_step)
             
-            # Apply the filter to get the synoptic component
-            synoptic_slice = synoptic_scale_filter(time_slice)
-            breakpoint()
-            # Calculate the meso-scale component
-            meso_slice = time_slice - synoptic_slice
-            
-            synoptic_slices.append(synoptic_slice)
+            # Force arrays to be dimensionless (plain numpy arrays)
+            time_slice_plain = time_slice.metpy.dequantify()
+            synoptic_slice_plain = synoptic_scale_filter(time_slice_plain)
+            meso_slice = time_slice_plain - synoptic_slice_plain
+
+            # Append the plain-array results for accumulation
+            synoptic_slices.append(synoptic_slice_plain)
             meso_slices.append(meso_slice)
 
         # Reconstruct the 3D DataArrays
-        synoptic_vars[var_name] = xr.concat(synoptic_slices, dim='time').rename(f"{var_name}_synoptic")
-        meso_vars[var_name] = xr.concat(meso_slices, dim='time').rename(f"{var_name}_meso")
+        synoptic_da = xr.concat(synoptic_slices, dim='time')
+        meso_da = xr.concat(meso_slices, dim='time')
+        
+        # Restore original attributes
+        synoptic_da.attrs.update(original_da.attrs)
+        meso_da.attrs.update(original_da.attrs)
+        
+        # Use the NEW, suffixed name as the key for the dictionary.
+        synoptic_vars[f"{var_name}_synoptic"] = synoptic_da.rename(f"{var_name}_synoptic")
+        meso_vars[f"{var_name}_meso"] = meso_da.rename(f"{var_name}_meso")
 
     return xr.Dataset(synoptic_vars, coords=ds_derived.coords), xr.Dataset(meso_vars, coords=ds_derived.coords)
 
