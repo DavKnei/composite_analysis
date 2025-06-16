@@ -78,19 +78,17 @@ def create_offset_cols(df: pd.DataFrame) -> Dict[int, str]:
     return offset_cols
 
 # --- Spectral Filter and Scale Separation ---
-
 def synoptic_scale_filter(data_array: xr.DataArray) -> xr.DataArray:
     """
     Apply a 2D Gaussian low-pass filter for synoptic scale separation.
-    Uses a 1000 km wavelength cutoff.
+    This version operates on and returns unitless DataArrays.
     """
     if data_array.ndim != 2: raise ValueError("Input data_array must be 2-dimensional.")
     
     ny, nx = data_array.shape
     
-    # Use MetPy constant for Earth radius
     R = earth_avg_radius.to('m').m
-
+    
     dlon_deg = np.abs(data_array.longitude.diff('longitude').mean().item())
     dlat_deg = np.abs(data_array.latitude.diff('latitude').mean().item())
     mean_lat_rad = np.deg2rad(data_array.latitude.mean().item())
@@ -104,24 +102,27 @@ def synoptic_scale_filter(data_array: xr.DataArray) -> xr.DataArray:
     
     k_magnitude = np.sqrt(kxx**2 + kyy**2)
     
-    lambda_half_m, epsilon = 1000 * 1000, 1e-9  # 1000 km cutoff, epsilon to avoid division by zero
+    lambda_half_m, epsilon = 1000 * 1000, 1e-9
     k_half = (2 * np.pi) / lambda_half_m
     
     filter_mask = np.exp(-np.log(2) * (k_magnitude / (k_half + epsilon))**2)
     
     nan_mask = data_array.isnull()
-    filled_data = data_array.fillna(0)
     
-    data_fft = fft2(filled_data.values)
+    # .values is safe; the underlying data is already a plain numpy array
+    filled_data_values = data_array.fillna(0).values
+    
+    data_fft = fft2(filled_data_values)
     filtered_fft = data_fft * filter_mask
     filtered_data_values = np.real(ifft2(filtered_fft))
     
+    # Create the new DataArray. It will be unitless, just like the input.
     filtered_da = xr.DataArray(
         filtered_data_values, 
         coords=data_array.coords, 
         dims=data_array.dims, 
         name=data_array.name, 
-        attrs=data_array.attrs
+        attrs=data_array.attrs # Copy attributes like 'long_name' and the 'units' string
     )
     
     return filtered_da.where(~nan_mask)
@@ -151,7 +152,7 @@ def apply_scale_separation(ds_derived: xr.Dataset) -> (xr.Dataset, xr.Dataset):
             
             # Apply the filter to get the synoptic component
             synoptic_slice = synoptic_scale_filter(time_slice)
-            
+            breakpoint()
             # Calculate the meso-scale component
             meso_slice = time_slice - synoptic_slice
             
