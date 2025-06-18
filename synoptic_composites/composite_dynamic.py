@@ -4,7 +4,8 @@ Compute MJJAS ERA5 composites for derived single-level variables
 (upper-level jet, divergence, PV, shear, moisture-flux convergence,
 low-level convergence), stratified by weather type and time offset.
 This version includes a spectral filter to separate fields into
-synoptic and meso-scale components, which are saved separately.
+synoptic and meso-scale components. It saves both the mean composites
+and the individual event data in separate files.
 """
 import sys
 import argparse
@@ -58,7 +59,6 @@ def standardize_ds(ds: xr.Dataset) -> xr.Dataset:
     if 'lon' in ds.coords:
         ds = ds.rename({'lon': 'longitude'})
     
-    # Ensure latitude is sorted ascending
     if ds['latitude'].size > 1 and ds['latitude'].values[0] > ds['latitude'].values[-1]:
         ds = ds.reindex(latitude=list(np.sort(ds['latitude'].values)))
     
@@ -109,20 +109,18 @@ def synoptic_scale_filter(data_array: xr.DataArray) -> xr.DataArray:
     
     nan_mask = data_array.isnull()
     
-    # .values is safe; the underlying data is already a plain numpy array
     filled_data_values = data_array.fillna(0).values
     
     data_fft = fft2(filled_data_values)
     filtered_fft = data_fft * filter_mask
     filtered_data_values = np.real(ifft2(filtered_fft))
     
-    # Create the new DataArray. It will be unitless, just like the input.
     filtered_da = xr.DataArray(
         filtered_data_values, 
         coords=data_array.coords, 
         dims=data_array.dims, 
         name=data_array.name, 
-        attrs=data_array.attrs # Copy attributes like 'long_name' and the 'units' string
+        attrs=data_array.attrs
     )
     
     return filtered_da.where(~nan_mask)
@@ -130,12 +128,6 @@ def synoptic_scale_filter(data_array: xr.DataArray) -> xr.DataArray:
 def apply_scale_separation(ds_derived: xr.Dataset) -> (xr.Dataset, xr.Dataset):
     """
     Separates each variable in the dataset into synoptic and meso-scale components.
-
-    Args:
-        ds_derived: A Dataset with 3D (time, lat, lon) variables.
-
-    Returns:
-        A tuple of two Datasets: (synoptic_fields, meso_fields).
     """
     synoptic_vars = {}
     meso_vars = {}
@@ -146,28 +138,23 @@ def apply_scale_separation(ds_derived: xr.Dataset) -> (xr.Dataset, xr.Dataset):
         synoptic_slices = []
         meso_slices = []
 
-        # Iterate over each time step to apply the 2D filter
         for t_step in original_da.time:
             time_slice = original_da.sel(time=t_step)
             
-            # Force arrays to be dimensionless (plain numpy arrays)
             time_slice_plain = time_slice.metpy.dequantify()
+
             synoptic_slice_plain = synoptic_scale_filter(time_slice_plain)
             meso_slice = time_slice_plain - synoptic_slice_plain
 
-            # Append the plain-array results for accumulation
             synoptic_slices.append(synoptic_slice_plain)
             meso_slices.append(meso_slice)
 
-        # Reconstruct the 3D DataArrays
         synoptic_da = xr.concat(synoptic_slices, dim='time')
         meso_da = xr.concat(meso_slices, dim='time')
         
-        # Restore original attributes
         synoptic_da.attrs.update(original_da.attrs)
         meso_da.attrs.update(original_da.attrs)
         
-        # Use the NEW, suffixed name as the key for the dictionary.
         synoptic_vars[f"{var_name}_synoptic"] = synoptic_da.rename(f"{var_name}_synoptic")
         meso_vars[f"{var_name}_meso"] = meso_da.rename(f"{var_name}_meso")
 
@@ -177,10 +164,6 @@ def apply_scale_separation(ds_derived: xr.Dataset) -> (xr.Dataset, xr.Dataset):
 # --- Derived Variable Calculation Functions ---
 
 def _calculate_divergence_base(u: xr.DataArray, v: xr.DataArray) -> xr.DataArray:
-    """
-    Base helper to calculate divergence using MetPy with explicit dx, dy.
-    Iterates over the time dimension to avoid indexing errors with 3D u/v and 2D dx/dy.
-    """
     u_q = u.metpy.quantify()
     v_q = v.metpy.quantify()
     dx_spacing, dy_spacing = lat_lon_grid_deltas(u.longitude, u.latitude)
@@ -265,14 +248,14 @@ def calculate_pv_500(ds_events: xr.Dataset) -> xr.DataArray:
 def calculate_rv_500(ds_events: xr.Dataset) -> xr.DataArray:
     u500 = ds_events.u.sel(level=500)
     v500 = ds_events.v.sel(level=500)
-    rel_vorticity = vorticity(u500, v500)
+    rel_vorticity = vorticity(u500, v500).metpy.dequantify()
     rel_vorticity.attrs.update({'units': 's-1', 'long_name': 'Relative Vorticity at 500 hPa'})
     return rel_vorticity.rename("rv_500")
 
 def calculate_rv_250(ds_events: xr.Dataset) -> xr.DataArray:
     u250 = ds_events.u.sel(level=250)
     v250 = ds_events.v.sel(level=250)
-    rel_vorticity = vorticity(u250, v250)
+    rel_vorticity = vorticity(u250, v250).metpy.dequantify()
     rel_vorticity.attrs.update({'units': 's-1', 'long_name': 'Relative Vorticity at 250 hPa'})
     return rel_vorticity.rename("rv_250")
 
@@ -300,12 +283,10 @@ def save_composites(
     lat_values: np.ndarray,
     lon_values: np.ndarray,
     period_details: Dict[str, Any],
-    scale_type: str  # 'synoptic' or 'meso'
+    scale_type: str
 ):
-    """Saves the computed composites to a NetCDF file."""
-    
+    """Saves the computed mean composites to a NetCDF file."""
     ds_output_vars = {**composite_means_dict, "event_count": event_counts_da}
-
     ds_to_save = xr.Dataset(
         ds_output_vars,
         coords={
@@ -316,21 +297,37 @@ def save_composites(
             'longitude': lon_values
         }
     )
-
     ds_to_save.attrs.update({
-        'description': (
-            f"MJJAS {scale_type}-scale composites of derived single-level variables."
-        ),
+        'description': f"MJJAS {scale_type}-scale mean composites of derived single-level variables.",
         'period_name': period_details['name'],
         'period_start_year': period_details['start'],
         'period_end_year': period_details['end'],
         'history': f"Created on {pd.Timestamp.now(tz='UTC')}"
     })
-
     encoding_options = {v: {'zlib': True, 'complevel': 4, '_FillValue': np.float32(1e20)} for v in ds_to_save.data_vars}
     out_path.parent.mkdir(parents=True, exist_ok=True)
     ds_to_save.to_netcdf(out_path, encoding=encoding_options)
-    logging.info(f"Wrote {scale_type} composites to {out_path}")
+    logging.info(f"Wrote {scale_type} mean composites to {out_path}")
+
+
+def save_events(
+    out_path: Path,
+    events_ds: xr.Dataset,
+    period_details: Dict[str, Any],
+    scale_type: str
+):
+    """Saves the individual processed events to a NetCDF file."""
+    events_ds.attrs.update({
+        'description': f"MJJAS individual {scale_type}-scale events for derived single-level variables.",
+        'period_name': period_details['name'],
+        'period_start_year': period_details['start'],
+        'period_end_year': period_details['end'],
+        'history': f"Created on {pd.Timestamp.now(tz='UTC')}"
+    })
+    encoding_options = {v: {'zlib': True, 'complevel': 4, '_FillValue': np.float32(1e20)} for v in events_ds.data_vars}
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    events_ds.to_netcdf(out_path, encoding=encoding_options)
+    logging.info(f"Wrote individual {scale_type} events to {out_path}")
 
 
 def main():
@@ -380,13 +377,17 @@ def main():
     if not unique_wts and 0 not in weather_types_to_process:
          weather_types_to_process = [0]
 
-    # Initialize accumulators for sums and counts
+    # --- Initialize accumulators for sums and counts ---
     lat_coord_values: Optional[np.ndarray] = None
     lon_coord_values: Optional[np.ndarray] = None
     global_synoptic_sum_accumulators: Dict[str, xr.DataArray] = {}
     global_meso_sum_accumulators: Dict[str, xr.DataArray] = {}
     global_event_counts_accumulator: Optional[xr.DataArray] = None
     is_first_file_processed = False
+    
+    # --- Initialize lists to collect individual event datasets ---
+    all_synoptic_events_list = []
+    all_meso_events_list = []
 
     for wt_value in weather_types_to_process:
         logging.info(f"Processing Weather Type (WT) = {wt_value}")
@@ -399,25 +400,24 @@ def main():
         for offset_value in selected_time_offsets:
             actual_time_column = offset_column_map.get(offset_value, 'datetime')
             if actual_time_column not in current_wt_df.columns:
-                logging.warning(f"  Offset column '{actual_time_column}' for offset {offset_value}h not found. Skipping WT={wt_value}, offset={offset_value}h.")
+                logging.warning(f"  Offset column '{actual_time_column}' for offset {offset_value}h not found. Skipping.")
                 continue
 
             datetimes_for_offset = current_wt_df.dropna(subset=[actual_time_column])[actual_time_column]
             if datetimes_for_offset.empty:
-                logging.info(f"  Offset {offset_value}h (column: {actual_time_column}): No valid event datetimes after NaN drop. Skipping.")
+                logging.info(f"  Offset {offset_value}h: No valid event datetimes. Skipping.")
                 continue
             
             original_jja_months = current_wt_df.loc[datetimes_for_offset.index, 'month_of_event']
-            logging.info(f"  Processing Offset = {offset_value}h. Total potential datetimes to load: {len(datetimes_for_offset)}")
+            logging.info(f"  Processing Offset = {offset_value}h. Total potential datetimes: {len(datetimes_for_offset)}")
 
             for target_composite_month in TARGET_MONTHS:
-                logging.debug(f"    Target MJJAS Composite Month: {target_composite_month}")
+                logging.debug(f"    Target Composite Month: {target_composite_month}")
                 final_datetimes_to_load_for_cell = pd.DatetimeIndex(
                     datetimes_for_offset[original_jja_months == target_composite_month]
                 )
                 
                 if final_datetimes_to_load_for_cell.empty:
-                    logging.debug(f"      No events for WT={wt_value}, Offset={offset_value}h, contributing to Target Composite Month={target_composite_month}.")
                     continue
                 
                 datetimes_grouped_by_era5_file = {}
@@ -468,17 +468,17 @@ def main():
                         time=pd.DatetimeIndex(datetimes_in_this_file), 
                         method='nearest', tolerance=pd.Timedelta('30M')
                     )
+                    _, unique_indices = np.unique(event_data_from_file.time, return_index=True)
+                    event_data_from_file = event_data_from_file.isel(time=unique_indices)
 
                     if event_data_from_file.time.size == 0:
                         logging.debug(f"          No matching time steps in {era5_file_path} after nearest time selection.")
                         continue
                     
                     derived_variables_for_events = calculate_all_derived_variables(event_data_from_file)
-                    
-                    # Apply scale separation filter
                     synoptic_vars, meso_vars = apply_scale_separation(derived_variables_for_events)
                     
-                    # Sum over the 'time' dimension for this file's events
+                    # --- Logic for Mean Composites (Unchanged) ---
                     synoptic_sums_for_file = synoptic_vars.sum(dim='time', skipna=True)
                     meso_sums_for_file = meso_vars.sum(dim='time', skipna=True)
 
@@ -491,7 +491,28 @@ def main():
                             cell_meso_sums[v_name] += meso_sums_for_file[f"{v_name}_meso"]
                     
                     cell_total_event_timesteps += event_data_from_file.time.size
-                
+
+                    # --- New Logic for Individual Events ---
+                    n_events_in_chunk = synoptic_vars.dims['time']
+                    if n_events_in_chunk > 0:
+                        # Create metadata arrays for this chunk
+                        event_wt = xr.DataArray(np.full(n_events_in_chunk, wt_value), dims="time", coords={"time": synoptic_vars.time})
+                        event_offset = xr.DataArray(np.full(n_events_in_chunk, offset_value), dims="time", coords={"time": synoptic_vars.time})
+                        event_month = xr.DataArray(np.full(n_events_in_chunk, target_composite_month), dims="time", coords={"time": synoptic_vars.time})
+                        
+                        # Add metadata to the datasets
+                        synoptic_vars['event_weather_type'] = event_wt
+                        synoptic_vars['event_time_offset'] = event_offset
+                        synoptic_vars['event_target_month'] = event_month
+                        
+                        meso_vars['event_weather_type'] = event_wt
+                        meso_vars['event_time_offset'] = event_offset
+                        meso_vars['event_target_month'] = event_month
+
+                        # Append datasets to the master lists
+                        all_synoptic_events_list.append(synoptic_vars)
+                        all_meso_events_list.append(meso_vars)
+
                 if cell_synoptic_sums is not None and is_first_file_processed:
                     wt_idx = weather_types_to_process.index(wt_value)
                     month_idx = TARGET_MONTHS.index(target_composite_month)
@@ -505,50 +526,49 @@ def main():
                         global_event_counts_accumulator[wt_idx, month_idx, offset_idx] += cell_total_event_timesteps
 
     if not is_first_file_processed:
-        logging.error("No ERA5 data files were successfully processed. Cannot calculate composites or save output.")
+        logging.error("No data processed. Cannot create output files.")
         if df_filtered_events.empty:
              logging.info("This is likely because no events were found in the input CSV for the specified period/months.")
         sys.exit(1)
 
-    # --- Calculate and Save Final Composites ---
-    
-    final_synoptic_means = {}
-    final_meso_means = {}
-
-    for var_name in DERIVED_VARIABLES:
-        with np.errstate(divide='ignore', invalid='ignore'):
-            synoptic_mean_da = global_synoptic_sum_accumulators[var_name] / global_event_counts_accumulator
-            meso_mean_da = global_meso_sum_accumulators[var_name] / global_event_counts_accumulator
-        
-        if global_event_counts_accumulator is not None:
-             final_synoptic_means[f"{var_name}_mean"] = synoptic_mean_da.where(global_event_counts_accumulator > 0)
-             final_meso_means[f"{var_name}_mean"] = meso_mean_da.where(global_event_counts_accumulator > 0)
-        else:
-             final_synoptic_means[f"{var_name}_mean"] = synoptic_mean_da
-             final_meso_means[f"{var_name}_mean"] = meso_mean_da
-
+    # --- Calculate and Save Final Composites (Unchanged) ---
     output_suffix_base = "_nomcs" if args.noMCS else ""
     
-    # Ensure lat/lon values are available for saving
-    if lat_coord_values is None or lon_coord_values is None or global_event_counts_accumulator is None:
-        logging.error("FATAL: Grid coordinates or event counts are missing before saving.")
-        sys.exit(1)
+    if lat_coord_values is not None and lon_coord_values is not None and global_event_counts_accumulator is not None:
+        final_synoptic_means = {}
+        final_meso_means = {}
+        for var_name in DERIVED_VARIABLES:
+            with np.errstate(divide='ignore', invalid='ignore'):
+                synoptic_mean_da = global_synoptic_sum_accumulators[var_name] / global_event_counts_accumulator
+                meso_mean_da = global_meso_sum_accumulators[var_name] / global_event_counts_accumulator
+            final_synoptic_means[f"{var_name}_mean"] = synoptic_mean_da.where(global_event_counts_accumulator > 0)
+            final_meso_means[f"{var_name}_mean"] = meso_mean_da.where(global_event_counts_accumulator > 0)
+        
+        output_synoptic_filename = args.output_dir / f"composite_synoptic_{args.region}_{period_info['name']}{output_suffix_base}.nc"
+        save_composites(output_synoptic_filename, final_synoptic_means, global_event_counts_accumulator,
+                        weather_types_to_process, TARGET_MONTHS, selected_time_offsets,
+                        lat_coord_values, lon_coord_values, period_info, scale_type='synoptic')
+        
+        output_meso_filename = args.output_dir / f"composite_meso_{args.region}_{period_info['name']}{output_suffix_base}.nc"
+        save_composites(output_meso_filename, final_meso_means, global_event_counts_accumulator,
+                        weather_types_to_process, TARGET_MONTHS, selected_time_offsets,
+                        lat_coord_values, lon_coord_values, period_info, scale_type='meso')
+    else:
+        logging.warning("Global accumulators not fully initialized. Skipping saving of mean composites.")
 
-    # Save Synoptic Composites
-    output_synoptic_filename = args.output_dir / f"composite_synoptic_{args.region}_{period_info['name']}{output_suffix_base}.nc"
-    save_composites(
-        output_synoptic_filename, final_synoptic_means, global_event_counts_accumulator,
-        weather_types_to_process, TARGET_MONTHS, selected_time_offsets,
-        lat_coord_values, lon_coord_values, period_info, scale_type='synoptic'
-    )
-    
-    # Save Meso-scale Composites
-    output_meso_filename = args.output_dir / f"composite_meso_{args.region}_{period_info['name']}{output_suffix_base}.nc"
-    save_composites(
-        output_meso_filename, final_meso_means, global_event_counts_accumulator,
-        weather_types_to_process, TARGET_MONTHS, selected_time_offsets,
-        lat_coord_values, lon_coord_values, period_info, scale_type='meso'
-    )
+    # --- New: Concatenate and Save Individual Events ---
+    if all_synoptic_events_list:
+        logging.info("Concatenating all individual synoptic events...")
+        final_synoptic_events_ds = xr.concat(all_synoptic_events_list, dim="time")
+        output_synoptic_events_filename = args.output_dir / f"events_synoptic_{args.region}_{period_info['name']}{output_suffix_base}.nc"
+        save_events(output_synoptic_events_filename, final_synoptic_events_ds, period_info, 'synoptic')
+
+        logging.info("Concatenating all individual meso events...")
+        final_meso_events_ds = xr.concat(all_meso_events_list, dim="time")
+        output_meso_events_filename = args.output_dir / f"events_meso_{args.region}_{period_info['name']}{output_suffix_base}.nc"
+        save_events(output_meso_events_filename, final_meso_events_ds, period_info, 'meso')
+    else:
+        logging.warning("No individual events were processed to save.")
 
     logging.info("Processing completed.")
 
