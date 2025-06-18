@@ -74,8 +74,7 @@ def gaussian_lowpass_31day(da: xr.DataArray, sigma: float = 7.3) -> xr.DataArray
     Uses xarray's rolling().dot() method for robustness with dask.
     """
     window_size = 31
-    print(f"Applying Gaussian low-pass filter (sigma={sigma}, window={window_size})...")
-
+    
     # Define the Gaussian weights as an xarray DataArray
     window_dim = "window"
     weights = xr.DataArray(
@@ -309,7 +308,7 @@ def main() -> None:
             # 1. High-pass filter (@fil:-31)
             da_processed = high_pass_filter(da_reg)
             # 2. Normalize (@nrm:1)
-            da_processed = normalize_data(da_processed)
+            # da_processed = normalize_data(da_processed)
 
         else:
             print("Skipping manual normalization and filtering steps.")
