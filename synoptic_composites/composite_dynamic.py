@@ -314,20 +314,34 @@ def save_events(
     out_path: Path,
     events_ds: xr.Dataset,
     period_details: Dict[str, Any],
-    scale_type: str
+    scale_type: str,
+    mode: str = 'w',
+    encoding: Optional[Dict] = None
 ):
     """Saves the individual processed events to a NetCDF file."""
-    events_ds.attrs.update({
-        'description': f"MJJAS individual {scale_type}-scale events for derived single-level variables.",
-        'period_name': period_details['name'],
-        'period_start_year': period_details['start'],
-        'period_end_year': period_details['end'],
-        'history': f"Created on {pd.Timestamp.now(tz='UTC')}"
-    })
-    encoding_options = {v: {'zlib': True, 'complevel': 4, '_FillValue': np.float32(1e20)} for v in events_ds.data_vars}
+    if mode == 'w':
+        # If writing for the first time, include metadata
+        events_ds.attrs.update({
+            'description': f"MJJAS individual {scale_type}-scale events for derived single-level variables.",
+            'period_name': period_details['name'],
+            'period_start_year': period_details['start'],
+            'period_end_year': period_details['end'],
+            'history': f"Created on {pd.Timestamp.now(tz='UTC')}"
+        })
+    
+    # Use the passed encoding, or create one if not provided
+    encoding_options = encoding if encoding is not None else \
+        {v: {'zlib': True, 'complevel': 4, '_FillValue': np.float32(1e20)} for v in events_ds.data_vars}
+
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    events_ds.to_netcdf(out_path, encoding=encoding_options)
-    logging.info(f"Wrote individual {scale_type} events to {out_path}")
+    
+    # Use the mode and specify the append dimension
+    events_ds.to_netcdf(out_path, mode=mode, encoding=encoding_options, unlimited_dims=['time'])
+    
+    if mode == 'w':
+        logging.info(f"Wrote individual {scale_type} events to {out_path}")
+    else:
+        logging.info(f"Appended individual {scale_type} events to {out_path}")
 
 
 def main():
@@ -386,8 +400,8 @@ def main():
     is_first_file_processed = False
     
     # --- Initialize lists to collect individual event datasets ---
-    all_synoptic_events_list = []
-    all_meso_events_list = []
+    synoptic_events_file_created = False
+    meso_events_file_created = False
 
     for wt_value in weather_types_to_process:
         logging.info(f"Processing Weather Type (WT) = {wt_value}")
@@ -473,7 +487,7 @@ def main():
                             sys.exit(1)
 
                     event_data_from_file = loaded_monthly_ds.copy()
-                    
+
                     _, unique_indices = np.unique(event_data_from_file.time, return_index=True)
                     event_data_from_file = event_data_from_file.isel(time=unique_indices)
 
@@ -498,26 +512,33 @@ def main():
                     
                     cell_total_event_timesteps += event_data_from_file.time.size
 
-                    # --- New Logic for Individual Events ---
-                    n_events_in_chunk = synoptic_vars.dims['time']
-                    if n_events_in_chunk > 0:
-                        # Create metadata arrays for this chunk
-                        event_wt = xr.DataArray(np.full(n_events_in_chunk, wt_value), dims="time", coords={"time": synoptic_vars.time})
-                        event_offset = xr.DataArray(np.full(n_events_in_chunk, offset_value), dims="time", coords={"time": synoptic_vars.time})
-                        event_month = xr.DataArray(np.full(n_events_in_chunk, target_composite_month), dims="time", coords={"time": synoptic_vars.time})
-                        
-                        # Add metadata to the datasets
-                        synoptic_vars['event_weather_type'] = event_wt
-                        synoptic_vars['event_time_offset'] = event_offset
-                        synoptic_vars['event_target_month'] = event_month
-                        
-                        meso_vars['event_weather_type'] = event_wt
-                        meso_vars['event_time_offset'] = event_offset
-                        meso_vars['event_target_month'] = event_month
+                n_events_in_chunk = synoptic_vars.dims['time']
+                if n_events_in_chunk > 0 and not args.noMCS:
+                    # Create metadata arrays for this chunk
+                    event_wt = xr.DataArray(np.full(n_events_in_chunk, wt_value), dims="time", coords={"time": synoptic_vars.time})
+                    event_offset = xr.DataArray(np.full(n_events_in_chunk, offset_value), dims="time", coords={"time": synoptic_vars.time})
+                    event_month = xr.DataArray(np.full(n_events_in_chunk, target_composite_month), dims="time", coords={"time": synoptic_vars.time})
 
-                        # Append datasets to the master lists
-                        all_synoptic_events_list.append(synoptic_vars)
-                        all_meso_events_list.append(meso_vars)
+                    # Add metadata to the datasets
+                    synoptic_vars['event_weather_type'] = event_wt
+                    synoptic_vars['event_time_offset'] = event_offset
+                    synoptic_vars['event_target_month'] = event_month
+
+                    meso_vars['event_weather_type'] = event_wt
+                    meso_vars['event_time_offset'] = event_offset
+                    meso_vars['event_target_month'] = event_month
+
+                    # Save/Append synoptic events
+                    output_synoptic_events_filename = args.output_dir / f"events_synoptic_{args.region}_{period_info['name']}{output_suffix_base}.nc"
+                    syno_mode = 'a' if synoptic_events_file_created else 'w'
+                    save_events(output_synoptic_events_filename, synoptic_vars, period_info, 'synoptic', mode=syno_mode)
+                    synoptic_events_file_created = True
+
+                    # Save/Append meso events
+                    output_meso_events_filename = args.output_dir / f"events_meso_{args.region}_{period_info['name']}{output_suffix_base}.nc"
+                    meso_mode = 'a' if meso_events_file_created else 'w'
+                    save_events(output_meso_events_filename, meso_vars, period_info, 'meso', mode=meso_mode)
+                    meso_events_file_created = True
 
                 if cell_synoptic_sums is not None and is_first_file_processed:
                     wt_idx = weather_types_to_process.index(wt_value)
