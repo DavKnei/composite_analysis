@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Compute MJJAS ERA5 composites for derived single-level variables
+Compute MJJAS ERA5 composites for derived dynamic variables
 (upper-level jet, divergence, PV, shear, moisture-flux convergence,
 low-level convergence), stratified by weather type and time offset.
 This version includes a spectral filter to separate fields into
@@ -408,13 +408,13 @@ def main():
                 logging.info(f"  Offset {offset_value}h: No valid event datetimes. Skipping.")
                 continue
             
-            original_jja_months = current_wt_df.loc[datetimes_for_offset.index, 'month_of_event']
+            original_months = current_wt_df.loc[datetimes_for_offset.index, 'month_of_event']
             logging.info(f"  Processing Offset = {offset_value}h. Total potential datetimes: {len(datetimes_for_offset)}")
 
             for target_composite_month in TARGET_MONTHS:
                 logging.debug(f"    Target Composite Month: {target_composite_month}")
                 final_datetimes_to_load_for_cell = pd.DatetimeIndex(
-                    datetimes_for_offset[original_jja_months == target_composite_month]
+                    datetimes_for_offset[original_months == target_composite_month]
                 )
                 
                 if final_datetimes_to_load_for_cell.empty:
@@ -435,7 +435,15 @@ def main():
 
                     with xr.open_dataset(era5_file_path) as raw_monthly_ds:
                         standardized_ds = standardize_ds(raw_monthly_ds)
-                        loaded_monthly_ds = standardized_ds.load()
+                        
+                        # Select the required time slices first (this is a "lazy" operation)
+                        event_data_from_file_lazy = standardized_ds.sel(
+                            time=pd.DatetimeIndex(datetimes_in_this_file), 
+                            method='nearest', tolerance=pd.Timedelta('30M')
+                        )
+                        
+                        # Now, load only the small, selected subset into memory
+                        loaded_monthly_ds = event_data_from_file_lazy.load()
                             
                     if not is_first_file_processed:
                         lat_coord_values = loaded_monthly_ds.latitude.values.copy()
@@ -464,15 +472,13 @@ def main():
                             logging.error(f"FATAL: Grid mismatch in {era5_file_path}. Aborting.")
                             sys.exit(1)
 
-                    event_data_from_file = loaded_monthly_ds.sel(
-                        time=pd.DatetimeIndex(datetimes_in_this_file), 
-                        method='nearest', tolerance=pd.Timedelta('30M')
-                    )
+                    event_data_from_file = loaded_monthly_ds.copy()
+                    
                     _, unique_indices = np.unique(event_data_from_file.time, return_index=True)
                     event_data_from_file = event_data_from_file.isel(time=unique_indices)
 
                     if event_data_from_file.time.size == 0:
-                        logging.debug(f"          No matching time steps in {era5_file_path} after nearest time selection.")
+                        logging.debug(f"No matching time steps in {era5_file_path} after nearest time selection.")
                         continue
                     
                     derived_variables_for_events = calculate_all_derived_variables(event_data_from_file)
@@ -549,15 +555,16 @@ def main():
                         weather_types_to_process, TARGET_MONTHS, selected_time_offsets,
                         lat_coord_values, lon_coord_values, period_info, scale_type='synoptic')
         
-        output_meso_filename = args.output_dir / f"composite_meso_{args.region}_{period_info['name']}{output_suffix_base}.nc"
-        save_composites(output_meso_filename, final_meso_means, global_event_counts_accumulator,
-                        weather_types_to_process, TARGET_MONTHS, selected_time_offsets,
-                        lat_coord_values, lon_coord_values, period_info, scale_type='meso')
+        if not args.noMCS:
+            output_meso_filename = args.output_dir / f"composite_meso_{args.region}_{period_info['name']}{output_suffix_base}.nc"
+            save_composites(output_meso_filename, final_meso_means, global_event_counts_accumulator,
+                            weather_types_to_process, TARGET_MONTHS, selected_time_offsets,
+                            lat_coord_values, lon_coord_values, period_info, scale_type='meso')
     else:
         logging.warning("Global accumulators not fully initialized. Skipping saving of mean composites.")
 
     # --- New: Concatenate and Save Individual Events ---
-    if all_synoptic_events_list:
+    if all_synoptic_events_list and not args.noMCS:  # only store individual events for mcs events
         logging.info("Concatenating all individual synoptic events...")
         final_synoptic_events_ds = xr.concat(all_synoptic_events_list, dim="time")
         output_synoptic_events_filename = args.output_dir / f"events_synoptic_{args.region}_{period_info['name']}{output_suffix_base}.nc"
