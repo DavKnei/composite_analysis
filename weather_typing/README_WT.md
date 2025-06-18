@@ -7,7 +7,7 @@ This dir of the repository contains the scripts and workflow used for weather ty
 The weather typing procedure is executed as follows:
 
 1.  **Initial ERA5 Preprocessing**: Hourly ERA5 pressure level data is processed to create daily-mean NetCDF files. This step ensures the data has the correct temporal resolution and dimensional structure (`time`, `lat`, `lon`) for subsequent analysis. This is performed by the `preprocess_ERA5_cost733.py` script.
-2.  **Conversion to ASCII and Further Preprocessing**: The daily-mean NetCDF files are then converted to the ASCII format required by `cost733class`. During this step, the data is also regridded, spatially subsetted for specific regions, and undergoes normalization and filtering. This is handled by the `convert_netcdf_to_ascii.py` script. Both preprocessing scripts are located in the `preprocess/` subdirectory.
+2.  **Conversion to ASCII and Further Preprocessing**: The daily-mean NetCDF files are then converted to the ASCII format required by `cost733class`. During this step, the data is also regridded, spatially subsetted for specific regions, and undergoes filtering. This is handled by the `convert_netcdf_to_ascii.py` script. Both preprocessing scripts are located in the `preprocess/` subdirectory.
 3.  **Weather Typing**: The final weather typing (classification) is performed using the `cost733class` command-line tool, orchestrated by the `run_cost733_ascii.py` script located in the root of this specific experiment's subdirectory. This script takes the preprocessed ASCII files as input.
 
 ## Step 1: Initial ERA5 Preprocessing
@@ -27,7 +27,7 @@ The script `preprocess/preprocess_ERA5_cost733.py` is responsible for the initia
     * Concatenates the processed daily data across all specified years.
     * The selected variable is renamed (e.g., 'z' becomes 'z500').
     * Uses Dask for efficient, chunked processing.
-* **Output**: A single NetCDF file (e.g., `z500_gb_daily_{start}_{end}.nc`) containing the daily-mean data for the specified variable, period, and domain, ready for the next stage. The output NetCDF is compressed (zlib, level 4) and uses 32-bit floats.
+* **Output**: A single NetCDF file (e.g., `z500_Alps_daily_{start}_{end}.nc`) containing the daily-mean data for the specified variable, period, and domain, ready for the next stage. The output NetCDF is compressed (zlib, level 4) and uses 32-bit floats.
 
 ## Step 2: Conversion to ASCII and Further Preprocessing
 
@@ -40,13 +40,12 @@ The script `preprocess/convert_netcdf_to_ascii.py` takes the output from Step 1 
     * Uses Dask for parallel processing.
     * Ensures latitude coordinates are in ascending order (South to North).
     * Converts data to `float32` precision if not already.
-    * Iterates over a list of predefined regions (e.g., "southern_alps", "eastern_alps"):
+    * Iterates over a list of predefined regions (e.g., "southern_alps", "Alps"):
         * Calculates the center latitude and longitude for the current region based on `regions.yaml`.
         * **Regridding**: Performs bilinear regridding of the data to a 1.0° x 1.0° resolution using the `regrid_bilinear` function.
         * **Domain Selection**: Selects a spatial subset of the data centered on the region (typically ±10° latitude and ±15° longitude from the center).
-        * **Data Normalization & Filtering (applied by default, can be skipped with `--skip_filter`):**
+        * **Data Filtering (applied by default, can be skipped with `--skip_filter`):**
             * **High-pass Filter (`@fil:-31`)**: A 31-day Gaussian high-pass filter is applied. This is achieved by subtracting a 31-day Gaussian low-pass filtered version of the data from the original data. The low-pass filter (`gaussian_lowpass_31day`) is NaN-aware.
-            * **Normalization (`@nrm:1`)**: Row-wise centering is performed by subtracting the spatial mean of each time step from that time step's field using the `normalize_data` function.
         * The processed data is transposed to (`time`, `lat`, `lon`) order.
         * Dask computations are triggered to process the data.
 * **Output (for each region)**:
@@ -95,8 +94,8 @@ The script `run_cost733_ascii.py` (located in this directory) executes the `cost
     *Note: The default input path in `convert_netcdf_to_ascii.py` is `/home/dkn/ERA5/z500_daily_2001_2020.nc`. The output path root is `/home/dkn/ERA5/z500_daily_2001_2020_filtered`, so output files will be named like `z500_daily_2001_2020_filtered_eastern_alps.dat`.*
 3.  **Perform the weather typing**. Adjust the method, number of classes, region, and other parameters as needed.
     ```bash
-    # Example for GWT_Z500 with 10 classes for eastern_alps
-    python run_cost733_ascii.py --method GWT_Z500 --ncl 10 --region eastern_alps --start 2001-01-01
+    # Example for GWT_Z500 with 10 classes for Alps
+    python run_cost733_ascii.py --method GWT_Z500 --ncl 10 --region Alps --start 2001-01-01
     ```
     *Ensure the `DATA_DIR` in `run_cost733_ascii.py` points to where the `.dat` and `.nc` files from step 2 are stored (default `/home/dkn/ERA5`). The output CSVs will be in `./csv/`.*
 
