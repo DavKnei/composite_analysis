@@ -83,6 +83,7 @@ def synoptic_scale_filter(data_array: xr.DataArray) -> xr.DataArray:
     Apply a 2D Gaussian low-pass filter for synoptic scale separation.
     This version operates on and returns unitless DataArrays.
     """
+    # CHANGED: The dimension is now 'event', not 'time'. This function is generic enough to handle it.
     if data_array.ndim != 2: raise ValueError("Input data_array must be 2-dimensional.")
     
     ny, nx = data_array.shape
@@ -131,6 +132,8 @@ def apply_scale_separation(ds_derived: xr.Dataset) -> (xr.Dataset, xr.Dataset):
     """
     synoptic_vars = {}
     meso_vars = {}
+    # CHANGED: The dimension for events is now 'event'.
+    event_dim = 'event'
 
     for var_name in ds_derived.data_vars:
         original_da = ds_derived[var_name]
@@ -138,19 +141,20 @@ def apply_scale_separation(ds_derived: xr.Dataset) -> (xr.Dataset, xr.Dataset):
         synoptic_slices = []
         meso_slices = []
 
-        for t_step in original_da.time:
-            time_slice = original_da.sel(time=t_step)
+        for event_idx in original_da[event_dim]:
+            event_slice = original_da.sel({event_dim: event_idx})
             
-            time_slice_plain = time_slice.metpy.dequantify()
+            event_slice_plain = event_slice.metpy.dequantify()
 
-            synoptic_slice_plain = synoptic_scale_filter(time_slice_plain)
-            meso_slice = time_slice_plain - synoptic_slice_plain
+            synoptic_slice_plain = synoptic_scale_filter(event_slice_plain)
+            meso_slice_plain = event_slice_plain - synoptic_slice_plain
 
             synoptic_slices.append(synoptic_slice_plain)
-            meso_slices.append(meso_slice)
+            meso_slices.append(meso_slice_plain)
 
-        synoptic_da = xr.concat(synoptic_slices, dim='time')
-        meso_da = xr.concat(meso_slices, dim='time')
+        # CHANGED: Concatenate along the 'event' dimension.
+        synoptic_da = xr.concat(synoptic_slices, dim=event_dim)
+        meso_da = xr.concat(meso_slices, dim=event_dim)
         
         synoptic_da.attrs.update(original_da.attrs)
         meso_da.attrs.update(original_da.attrs)
@@ -158,6 +162,7 @@ def apply_scale_separation(ds_derived: xr.Dataset) -> (xr.Dataset, xr.Dataset):
         synoptic_vars[f"{var_name}_synoptic"] = synoptic_da.rename(f"{var_name}_synoptic")
         meso_vars[f"{var_name}_meso"] = meso_da.rename(f"{var_name}_meso")
 
+    # CHANGED: Pass the original coordinates, which now include 'event' and 'track_number'.
     return xr.Dataset(synoptic_vars, coords=ds_derived.coords), xr.Dataset(meso_vars, coords=ds_derived.coords)
 
 
@@ -165,29 +170,34 @@ def apply_scale_separation(ds_derived: xr.Dataset) -> (xr.Dataset, xr.Dataset):
 
 def _calculate_divergence_base(u: xr.DataArray, v: xr.DataArray) -> xr.DataArray:
     u_q = u.metpy.quantify()
-    v_q = v.metpy.quantify()
+    v_q = v.metpy.dequantify().metpy.quantify()
     dx_spacing, dy_spacing = lat_lon_grid_deltas(u.longitude, u.latitude)
     divergence_slices = []
     
-    if 'time' in u_q.dims:
-        for t_idx in range(u_q.time.size):
-            u_slice = u_q.isel(time=t_idx)
-            v_slice = v_q.isel(time=t_idx)
+    # CHANGED: The dimension for events is now 'event'.
+    event_dim = 'event' if 'event' in u_q.dims else 'time'
+
+    if event_dim in u_q.dims:
+        for i in range(u_q[event_dim].size):
+            u_slice = u_q.isel({event_dim: i})
+            v_slice = v_q.isel({event_dim: i})
             div_slice = mp_divergence(u_slice, v_slice, dx=dx_spacing, dy=dy_spacing)
             divergence_slices.append(div_slice)
         
         if divergence_slices:
-            time_coord = u_q.time
-            combined_div_q = xr.concat(divergence_slices, dim=time_coord)
+            event_coord = u_q[event_dim]
+            combined_div_q = xr.concat(divergence_slices, dim=event_coord)
         else:
-             if not u_q.time.size:
-                expected_spatial_shape = u_q.isel(time=slice(0)).shape[1:]
+             if not u_q[event_dim].size:
+                expected_spatial_shape = u_q.isel({event_dim: slice(0)}).shape[1:]
                 empty_shape = (0,) + expected_spatial_shape
+                empty_coords = {event_dim: [], 'latitude': u.latitude, 'longitude': u.longitude}
+                empty_dims = (event_dim,) + u_q.dims[1:]
                 combined_div_q = xr.DataArray(np.full(empty_shape, np.nan), 
-                                            coords={'time': [], 'latitude': u.latitude, 'longitude': u.longitude},
-                                            dims=('time',) + u_q.dims[1:]) 
+                                            coords=empty_coords,
+                                            dims=empty_dims) 
              else:
-                 raise ValueError("Divergence calculation resulted in no slices despite time dimension existing.")
+                 raise ValueError("Divergence calculation resulted in no slices despite event dimension existing.")
     else:
         combined_div_q = mp_divergence(u_q, v_q, dx=dx_spacing, dy=dy_spacing)
 
@@ -236,9 +246,17 @@ def calculate_shear_500_850(ds_events: xr.Dataset) -> xr.DataArray:
 
 def calculate_pv_500(ds_events: xr.Dataset) -> xr.DataArray:
     ds_q = ds_events.metpy.quantify()
+    # CHANGED: Ensure latitude has units for MetPy calculation.
+    ds_q['latitude'] = ds_q.latitude.metpy.quantify()
     theta = potential_temperature(ds_q.level, ds_q.t) 
+    
+    # CHANGED: The dimension for events is now 'event'.
+    event_dim = 'event' if 'event' in ds_q.dims else 'time'
+    dx, dy = lat_lon_grid_deltas(ds_q.longitude, ds_q.latitude)
+
     pv_baroclinic = potential_vorticity_baroclinic(
-        theta, ds_q.level, ds_q.u, ds_q.v, latitude=ds_q.latitude
+        theta, ds_q.level, ds_q.u, ds_q.v, dx=dx, dy=dy, latitude=ds_q.latitude,
+        dim_order='zyx' if event_dim not in ds_q.u.dims else 'tzyx'
     )
     pv_500hpa = (pv_baroclinic.sel(level=500 * units.hPa).metpy.dequantify() * 1e6)
     pv_500hpa = pv_500hpa.drop_vars('level', errors='ignore')
@@ -270,7 +288,11 @@ def calculate_all_derived_variables(ds_events: xr.Dataset) -> xr.Dataset:
     derived_ds_dict['pv_500'] = calculate_pv_500(ds_events)
     derived_ds_dict['rv_500'] = calculate_rv_500(ds_events)
     derived_ds_dict['rv_250'] = calculate_rv_250(ds_events)
-    return xr.Dataset(derived_ds_dict, coords=ds_events.coords)
+    
+    # CHANGED: Explicitly define the coordinates for the new dataset, excluding 'level'.
+    # This prevents the redundant 'level' coordinate from being added to the final output.
+    new_coords = {c: ds_events.coords[c] for c in ds_events.coords if c != 'level'}
+    return xr.Dataset(derived_ds_dict, coords=new_coords)
 
 
 def save_composites(
@@ -329,14 +351,13 @@ def save_events(
             'history': f"Created on {pd.Timestamp.now(tz='UTC')}"
         })
     
-    # Use the passed encoding, or create one if not provided
     encoding_options = encoding if encoding is not None else \
         {v: {'zlib': True, 'complevel': 4, '_FillValue': np.float32(1e20)} for v in events_ds.data_vars}
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     
-    # Use the mode and specify the append dimension
-    events_ds.to_netcdf(out_path, mode=mode, encoding=encoding_options, unlimited_dims=['time'])
+    # CHANGED: Use 'event' as the unlimited dimension for appending.
+    events_ds.to_netcdf(out_path, mode=mode, encoding=encoding_options, unlimited_dims=['event'])
     
     if mode == 'w':
         logging.info(f"Wrote individual {scale_type} events to {out_path}")
@@ -370,6 +391,11 @@ def main():
         sys.exit(1)
         
     df_all_events = pd.read_csv(csv_path, parse_dates=[0])
+    # CHANGED: Ensure 'track_number' column exists.
+    if 'track_number' not in df_all_events.columns:
+        logging.error(f"FATAL: 'track_number' column not found in {csv_path}. This column is required.")
+        sys.exit(1)
+
     df_all_events.columns = ['datetime' if i == 0 else c for i, c in enumerate(df_all_events.columns)]
     df_all_events['datetime'] = df_all_events['datetime'].dt.round('H')
     df_all_events['year_of_event'] = df_all_events['datetime'].dt.year
@@ -391,7 +417,6 @@ def main():
     if not unique_wts and 0 not in weather_types_to_process:
          weather_types_to_process = [0]
 
-    # --- Initialize accumulators for sums and counts ---
     lat_coord_values: Optional[np.ndarray] = None
     lon_coord_values: Optional[np.ndarray] = None
     global_synoptic_sum_accumulators: Dict[str, xr.DataArray] = {}
@@ -399,9 +424,11 @@ def main():
     global_event_counts_accumulator: Optional[xr.DataArray] = None
     is_first_file_processed = False
     
-    # --- Initialize lists to collect individual event datasets ---
     synoptic_events_file_created = False
     meso_events_file_created = False
+    
+    # CHANGED: Moved definition of output_suffix_base to be used in the loop.
+    output_suffix_base = "_nomcs" if args.noMCS else ""
 
     for wt_value in weather_types_to_process:
         logging.info(f"Processing Weather Type (WT) = {wt_value}")
@@ -417,47 +444,48 @@ def main():
                 logging.warning(f"  Offset column '{actual_time_column}' for offset {offset_value}h not found. Skipping.")
                 continue
 
-            datetimes_for_offset = current_wt_df.dropna(subset=[actual_time_column])[actual_time_column]
-            if datetimes_for_offset.empty:
+            # CHANGED: Work with the dataframe of events, not just datetimes, to keep track_number.
+            events_for_offset = current_wt_df.dropna(subset=[actual_time_column])
+            if events_for_offset.empty:
                 logging.info(f"  Offset {offset_value}h: No valid event datetimes. Skipping.")
                 continue
             
-            original_months = current_wt_df.loc[datetimes_for_offset.index, 'month_of_event']
-            logging.info(f"  Processing Offset = {offset_value}h. Total potential datetimes: {len(datetimes_for_offset)}")
+            logging.info(f"  Processing Offset = {offset_value}h. Total potential events: {len(events_for_offset)}")
 
             for target_composite_month in TARGET_MONTHS:
                 logging.debug(f"    Target Composite Month: {target_composite_month}")
-                final_datetimes_to_load_for_cell = pd.DatetimeIndex(
-                    datetimes_for_offset[original_months == target_composite_month]
-                )
                 
-                if final_datetimes_to_load_for_cell.empty:
+                # CHANGED: Select events (rows) for the current month.
+                final_events_to_load_for_cell = events_for_offset[events_for_offset['month_of_event'] == target_composite_month]
+                
+                if final_events_to_load_for_cell.empty:
                     continue
                 
-                datetimes_grouped_by_era5_file = {}
-                for dt in final_datetimes_to_load_for_cell:
+                # CHANGED: Group events by the ERA5 file they belong to. Store (datetime, track_number) tuples.
+                events_grouped_by_era5_file = {}
+                for _, event_row in final_events_to_load_for_cell.iterrows():
+                    dt = event_row[actual_time_column]
+                    track_num = event_row['track_number']
                     file_key = (dt.year, dt.month)
-                    datetimes_grouped_by_era5_file.setdefault(file_key, []).append(dt)
+                    events_grouped_by_era5_file.setdefault(file_key, []).append((dt, track_num))
                 
                 cell_synoptic_sums: Optional[Dict[str, xr.DataArray]] = None
                 cell_meso_sums: Optional[Dict[str, xr.DataArray]] = None
                 cell_total_event_timesteps: int = 0 
 
-                for (era5_file_year, era5_file_month), datetimes_in_this_file in datetimes_grouped_by_era5_file.items():
+                for (era5_file_year, era5_file_month), events_in_this_file in events_grouped_by_era5_file.items():
                     era5_file_path = get_era5_file(args.data_dir, era5_file_year, era5_file_month)
-                    logging.debug(f"        Opening {era5_file_path} for {len(datetimes_in_this_file)} datetimes.")
+                    logging.debug(f"        Opening {era5_file_path} for {len(events_in_this_file)} events.")
+
+                    # CHANGED: Efficiently load unique datetimes required for the events in this file.
+                    unique_dts_to_load = pd.DatetimeIndex(list(set(dt for dt, tn in events_in_this_file))).sort_values()
 
                     with xr.open_dataset(era5_file_path) as raw_monthly_ds:
                         standardized_ds = standardize_ds(raw_monthly_ds)
-                        
-                        # Select the required time slices first (this is a "lazy" operation)
-                        event_data_from_file_lazy = standardized_ds.sel(
-                            time=pd.DatetimeIndex(datetimes_in_this_file), 
+                        loaded_monthly_ds = standardized_ds.sel(
+                            time=unique_dts_to_load, 
                             method='nearest', tolerance=pd.Timedelta('30M')
-                        )
-                        
-                        # Now, load only the small, selected subset into memory
-                        loaded_monthly_ds = event_data_from_file_lazy.load()
+                        ).load()
                             
                     if not is_first_file_processed:
                         lat_coord_values = loaded_monthly_ds.latitude.values.copy()
@@ -486,21 +514,31 @@ def main():
                             logging.error(f"FATAL: Grid mismatch in {era5_file_path}. Aborting.")
                             sys.exit(1)
 
-                    event_data_from_file = loaded_monthly_ds.copy()
-
-                    _, unique_indices = np.unique(event_data_from_file.time, return_index=True)
-                    event_data_from_file = event_data_from_file.isel(time=unique_indices)
-
-                    if event_data_from_file.time.size == 0:
+                    # CHANGED: Construct the event dataset by mapping loaded data to each event (and its track_number).
+                    event_slices = []
+                    track_numbers = []
+                    for dt, track_num in events_in_this_file:
+                        actual_time_slice = loaded_monthly_ds.sel(time=dt, method='nearest')
+                        event_slices.append(actual_time_slice)
+                        track_numbers.append(track_num)
+                    
+                    if not event_slices:
                         logging.debug(f"No matching time steps in {era5_file_path} after nearest time selection.")
+                        continue
+                    
+                    # Concatenate slices along a new 'event' dimension. This correctly handles duplicate times.
+                    event_data_from_file = xr.concat(event_slices, dim=pd.Index(range(len(event_slices)), name='event'))
+                    # Assign track_number as a coordinate along the new dimension.
+                    event_data_from_file = event_data_from_file.assign_coords(track_number=('event', track_numbers))
+
+                    if event_data_from_file.sizes['event'] == 0:
                         continue
                     
                     derived_variables_for_events = calculate_all_derived_variables(event_data_from_file)
                     synoptic_vars, meso_vars = apply_scale_separation(derived_variables_for_events)
                     
-                    # --- Logic for Mean Composites (Unchanged) ---
-                    synoptic_sums_for_file = synoptic_vars.sum(dim='time', skipna=True)
-                    meso_sums_for_file = meso_vars.sum(dim='time', skipna=True)
+                    synoptic_sums_for_file = synoptic_vars.sum(dim='event', skipna=True)
+                    meso_sums_for_file = meso_vars.sum(dim='event', skipna=True)
 
                     if cell_synoptic_sums is None:
                         cell_synoptic_sums = {v.replace('_synoptic', ''): synoptic_sums_for_file[v].copy() for v in synoptic_sums_for_file.data_vars}
@@ -510,35 +548,38 @@ def main():
                             cell_synoptic_sums[v_name] += synoptic_sums_for_file[f"{v_name}_synoptic"]
                             cell_meso_sums[v_name] += meso_sums_for_file[f"{v_name}_meso"]
                     
-                    cell_total_event_timesteps += event_data_from_file.time.size
+                    cell_total_event_timesteps += event_data_from_file.sizes['event']
 
-                n_events_in_chunk = synoptic_vars.dims['time']
-                if n_events_in_chunk > 0 and not args.noMCS:
-                    # Create metadata arrays for this chunk
-                    event_wt = xr.DataArray(np.full(n_events_in_chunk, wt_value), dims="time", coords={"time": synoptic_vars.time})
-                    event_offset = xr.DataArray(np.full(n_events_in_chunk, offset_value), dims="time", coords={"time": synoptic_vars.time})
-                    event_month = xr.DataArray(np.full(n_events_in_chunk, target_composite_month), dims="time", coords={"time": synoptic_vars.time})
+                    # CHANGED: Save individual events using the new 'event' dimension structure.
+                    n_events_in_chunk = synoptic_vars.dims['event']
+                    if n_events_in_chunk > 0 and not args.noMCS:
+                        # Create metadata arrays for this chunk along the 'event' dimension
+                        event_coords = {"event": synoptic_vars.event}
+                        event_wt = xr.DataArray(np.full(n_events_in_chunk, wt_value), dims="event", coords=event_coords)
+                        event_offset = xr.DataArray(np.full(n_events_in_chunk, offset_value), dims="event", coords=event_coords)
+                        event_month = xr.DataArray(np.full(n_events_in_chunk, target_composite_month), dims="event", coords=event_coords)
 
-                    # Add metadata to the datasets
-                    synoptic_vars['event_weather_type'] = event_wt
-                    synoptic_vars['event_time_offset'] = event_offset
-                    synoptic_vars['event_target_month'] = event_month
+                        # Add metadata to the datasets
+                        synoptic_vars['event_weather_type'] = event_wt
+                        synoptic_vars['event_time_offset'] = event_offset
+                        synoptic_vars['event_target_month'] = event_month
 
-                    meso_vars['event_weather_type'] = event_wt
-                    meso_vars['event_time_offset'] = event_offset
-                    meso_vars['event_target_month'] = event_month
+                        meso_vars['event_weather_type'] = event_wt
+                        meso_vars['event_time_offset'] = event_offset
+                        meso_vars['event_target_month'] = event_month
 
-                    # Save/Append synoptic events
-                    output_synoptic_events_filename = args.output_dir / f"events_synoptic_{args.region}_{period_info['name']}{output_suffix_base}.nc"
-                    syno_mode = 'a' if synoptic_events_file_created else 'w'
-                    save_events(output_synoptic_events_filename, synoptic_vars, period_info, 'synoptic', mode=syno_mode)
-                    synoptic_events_file_created = True
+                        # Save/Append synoptic events
+                        output_synoptic_events_filename = args.output_dir / f"events_synoptic_{args.region}_{period_info['name']}{output_suffix_base}.nc" 
+                        syno_mode = 'a' if synoptic_events_file_created else 'w'
+                        save_events(output_synoptic_events_filename, synoptic_vars, period_info, 'synoptic', mode=syno_mode)
+                        synoptic_events_file_created = True
 
-                    # Save/Append meso events
-                    output_meso_events_filename = args.output_dir / f"events_meso_{args.region}_{period_info['name']}{output_suffix_base}.nc"
-                    meso_mode = 'a' if meso_events_file_created else 'w'
-                    save_events(output_meso_events_filename, meso_vars, period_info, 'meso', mode=meso_mode)
-                    meso_events_file_created = True
+                        # Save/Append meso events
+                        output_meso_events_filename = args.output_dir / f"events_meso_{args.region}_{period_info['name']}{output_suffix_base}.nc"
+                        meso_mode = 'a' if meso_events_file_created else 'w'
+                        save_events(output_meso_events_filename, meso_vars, period_info, 'meso', mode=meso_mode)
+                        meso_events_file_created = True
+
 
                 if cell_synoptic_sums is not None and is_first_file_processed:
                     wt_idx = weather_types_to_process.index(wt_value)
@@ -558,9 +599,6 @@ def main():
              logging.info("This is likely because no events were found in the input CSV for the specified period/months.")
         sys.exit(1)
 
-    # --- Calculate and Save Final Composites (Unchanged) ---
-    output_suffix_base = "_nomcs" if args.noMCS else ""
-    
     if lat_coord_values is not None and lon_coord_values is not None and global_event_counts_accumulator is not None:
         final_synoptic_means = {}
         final_meso_means = {}
@@ -571,31 +609,20 @@ def main():
             final_synoptic_means[f"{var_name}_mean"] = synoptic_mean_da.where(global_event_counts_accumulator > 0)
             final_meso_means[f"{var_name}_mean"] = meso_mean_da.where(global_event_counts_accumulator > 0)
         
-        output_synoptic_filename = args.output_dir / f"composite_synoptic_{args.region}_{period_info['name']}{output_suffix_base}.nc"
+        output_synoptic_filename = args.output_dir / f"composite_dynamic_synoptic_{args.region}_{period_info['name']}{output_suffix_base}.nc"
         save_composites(output_synoptic_filename, final_synoptic_means, global_event_counts_accumulator,
                         weather_types_to_process, TARGET_MONTHS, selected_time_offsets,
                         lat_coord_values, lon_coord_values, period_info, scale_type='synoptic')
         
         if not args.noMCS:
-            output_meso_filename = args.output_dir / f"composite_meso_{args.region}_{period_info['name']}{output_suffix_base}.nc"
+            output_meso_filename = args.output_dir / f"composite_dynamic_meso_{args.region}_{period_info['name']}{output_suffix_base}.nc"
             save_composites(output_meso_filename, final_meso_means, global_event_counts_accumulator,
                             weather_types_to_process, TARGET_MONTHS, selected_time_offsets,
                             lat_coord_values, lon_coord_values, period_info, scale_type='meso')
     else:
         logging.warning("Global accumulators not fully initialized. Skipping saving of mean composites.")
 
-    # --- New: Concatenate and Save Individual Events ---
-    if all_synoptic_events_list and not args.noMCS:  # only store individual events for mcs events
-        logging.info("Concatenating all individual synoptic events...")
-        final_synoptic_events_ds = xr.concat(all_synoptic_events_list, dim="time")
-        output_synoptic_events_filename = args.output_dir / f"events_synoptic_{args.region}_{period_info['name']}{output_suffix_base}.nc"
-        save_events(output_synoptic_events_filename, final_synoptic_events_ds, period_info, 'synoptic')
-
-        logging.info("Concatenating all individual meso events...")
-        final_meso_events_ds = xr.concat(all_meso_events_list, dim="time")
-        output_meso_events_filename = args.output_dir / f"events_meso_{args.region}_{period_info['name']}{output_suffix_base}.nc"
-        save_events(output_meso_events_filename, final_meso_events_ds, period_info, 'meso')
-    else:
+    if not synoptic_events_file_created and not args.noMCS:
         logging.warning("No individual events were processed to save.")
 
     logging.info("Processing completed.")
