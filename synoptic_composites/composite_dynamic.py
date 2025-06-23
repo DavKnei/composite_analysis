@@ -336,6 +336,12 @@ def save_events(
     })
 
     encoding_options = {v: {'zlib': True, 'complevel': 4, '_FillValue': np.float32(1e20)} for v in events_ds.data_vars}
+    
+    # Add explicit encoding for event and track_number coordinates to prevent
+    # them from being misinterpreted as time variables by xarray.
+    encoding_options['event'] = {'dtype': 'int64', '_FillValue': None}
+    encoding_options['track_number'] = {'dtype': 'int64', '_FillValue': None}
+
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Write the file in one go. 'w' mode will overwrite if the file exists.
@@ -368,13 +374,37 @@ def main():
         logging.error(f"FATAL: Event CSV file not found: {csv_path}")
         sys.exit(1)
 
-    df_all_events = pd.read_csv(csv_path, parse_dates=[0])
+    # --- MODIFIED: Robustly read the CSV with specified dtypes ---
+    # Define the expected data types for numeric columns to prevent pandas
+    # from incorrectly converting them to datetime objects. This is the root fix.
+    dtype_mapping = {
+        'center_lat': float,
+        'center_lon': float,
+        'track_number': float,  # Read as float to handle potential NaNs
+        'total_precip': float,
+        'area': float,
+        'wt': float,            # Read as float to handle potential NaNs
+    }
+    # Read all other columns as objects to prevent unintended type inference
+    df_all_events = pd.read_csv(csv_path, parse_dates=[0], dtype=dtype_mapping)
+
     if 'track_number' not in df_all_events.columns:
         logging.error(f"FATAL: 'track_number' column not found in {csv_path}. This column is required.")
         sys.exit(1)
+        
+    # Now, safely convert integer columns, filling any missing values appropriately
+    df_all_events['track_number'] = df_all_events['track_number'].fillna(-1).astype(int)
+    df_all_events['wt'] = df_all_events['wt'].fillna(0).astype(int)
 
-    df_all_events.columns = ['datetime' if i == 0 else c for i, c in enumerate(df_all_events.columns)]
-    df_all_events['datetime'] = df_all_events['datetime'].dt.round('H')
+    # Convert all time-related columns to datetime, coercing errors
+    for col in df_all_events.columns:
+        if 'time' in col:
+            df_all_events[col] = pd.to_datetime(df_all_events[col], errors='coerce')
+            df_all_events[col] = df_all_events[col].dt.round('H')
+    # --- END MODIFIED SECTION ---
+
+    #df_all_events.columns = ['datetime' if i == 0 else c for i, c in enumerate(df_all_events.columns)]
+    df_all_events['datetime'] = df_all_events['time_0h'].dt.round('H')
     df_all_events['year_of_event'] = df_all_events['datetime'].dt.year
     df_all_events['month_of_event'] = df_all_events['datetime'].dt.month
 
@@ -401,13 +431,12 @@ def main():
     global_event_counts_accumulator: Optional[xr.DataArray] = None
     is_first_file_processed = False
 
-    # FIXED: Initialize lists to hold event datasets in memory.
-    # This implements the new strategy of collecting all data before writing to file.
     all_synoptic_events = []
     all_meso_events = []
 
     output_suffix_base = "_nomcs" if args.noMCS else ""
 
+    # --- MODIFIED: Simplified and corrected main processing loop ---
     for wt_value in weather_types_to_process:
         logging.info(f"Processing Weather Type (WT) = {wt_value}")
         current_wt_df = df_filtered_events if wt_value == 0 else df_filtered_events[df_filtered_events['wt'] == wt_value]
@@ -417,12 +446,14 @@ def main():
             continue
 
         for offset_value in selected_time_offsets:
-            actual_time_column = offset_column_map.get(offset_value, 'datetime')
-            if actual_time_column not in current_wt_df.columns:
-                logging.warning(f"  Offset column '{actual_time_column}' for offset {offset_value}h not found. Skipping.")
+            actual_time_column = offset_column_map.get(offset_value)
+
+            if actual_time_column is None or actual_time_column not in current_wt_df.columns:
+                logging.warning(f"  Offset column for offset {offset_value}h not found in CSV. Skipping.")
                 continue
 
             events_for_offset = current_wt_df.dropna(subset=[actual_time_column])
+            
             if events_for_offset.empty:
                 logging.info(f"  Offset {offset_value}h: No valid event datetimes. Skipping.")
                 continue
@@ -431,19 +462,23 @@ def main():
 
             for target_composite_month in TARGET_MONTHS:
                 logging.debug(f"    Target Composite Month: {target_composite_month}")
-
-                final_events_to_load_for_cell = events_for_offset[events_for_offset['month_of_event'] == target_composite_month]
+                
+                final_events_to_load_for_cell = events_for_offset[
+                    events_for_offset['month_of_event'] == target_composite_month
+                ]
 
                 if final_events_to_load_for_cell.empty:
                     continue
 
                 events_grouped_by_era5_file = {}
                 for _, event_row in final_events_to_load_for_cell.iterrows():
-                    dt = pd.to_datetime(event_row[actual_time_column])
+                    dt = event_row[actual_time_column]
                     track_num = event_row['track_number']
                     file_key = (dt.year, dt.month)
                     events_grouped_by_era5_file.setdefault(file_key, []).append((dt, track_num))
 
+                # This logic from here onwards is unchanged.
+                # It now operates on a clean, consistent group of events.
                 cell_synoptic_sums: Optional[Dict[str, xr.DataArray]] = None
                 cell_meso_sums: Optional[Dict[str, xr.DataArray]] = None
                 cell_total_event_timesteps: int = 0
@@ -452,9 +487,9 @@ def main():
                     era5_file_path = get_era5_file(args.data_dir, era5_file_year, era5_file_month)
                     logging.debug(f"        Opening {era5_file_path} for {len(events_in_this_file)} events.")
 
-                    unique_dts_to_load = pd.DatetimeIndex(list(set(dt for dt, tn in events_in_this_file))).sort_values()
+                    unique_dts_to_load = np.unique(pd.DatetimeIndex(list(set(dt for dt, tn in events_in_this_file))).sort_values())
 
-                    if unique_dts_to_load.empty:
+                    if len(unique_dts_to_load) == 0:
                         continue
 
                     with xr.open_dataset(era5_file_path) as raw_monthly_ds:
@@ -498,7 +533,8 @@ def main():
                             actual_time_slice = loaded_monthly_ds.sel(time=dt, method='nearest', tolerance=pd.Timedelta('30M'))
                             event_slices.append(actual_time_slice)
                             track_numbers.append(track_num)
-                        except KeyError:
+                        except:
+                            breakpoint()
                             logging.warning(f"Could not find time {dt} in {era5_file_path} even with nearest selection. Skipping event.")
                             continue
 
@@ -529,7 +565,6 @@ def main():
 
                     cell_total_event_timesteps += event_data_from_file.sizes['event']
 
-                    # FIXED: Instead of saving to file in a loop, append the processed chunk to a list.
                     n_events_in_chunk = synoptic_vars.dims['event']
                     if n_events_in_chunk > 0 and not args.noMCS:
                         event_coords = {"event": synoptic_vars.event}
@@ -589,7 +624,7 @@ def main():
     else:
         logging.warning("Global accumulators not fully initialized. Skipping saving of mean composites.")
 
-    # FIXED: Save all collected individual events at the end of the script.
+    # Save all collected individual events at the end of the script.
     if not args.noMCS:
         if all_synoptic_events:
             logging.info(f"Concatenating {len(all_synoptic_events)} synoptic event chunks...")
