@@ -159,7 +159,7 @@ def apply_scale_separation(ds_derived: xr.Dataset) -> (xr.Dataset, xr.Dataset):
         synoptic_vars[f"{var_name}_synoptic"] = synoptic_da.rename(f"{var_name}_synoptic")
         meso_vars[f"{var_name}_meso"] = meso_da.rename(f"{var_name}_meso")
 
-    return xr.Dataset(synoptic_vars, coords=ds_derived.coords), xr.Dataset(meso_vars, coords=ds_derived.coords)
+    return xr.Dataset(synoptic_vars), xr.Dataset(meso_vars)
 
 
 # --- Derived Variable Calculation Functions ---
@@ -237,7 +237,6 @@ def calculate_shear_500_850(ds_events: xr.Dataset) -> xr.DataArray:
     v850 = ds_events.v.sel(level=850)
     shear = np.hypot(u500 - u850, v500 - v850)
     shear.attrs.update({'units': 'm s-1', 'long_name': 'Magnitude of vector wind shear between 500 hPa and 850 hPa'})
-    # FIXED: Explicitly drop the 'level' coordinate to prevent merge errors.
     return shear.rename("shear_500_850").drop_vars('level', errors='ignore')
 
 def calculate_pv_500(ds_events: xr.Dataset) -> xr.DataArray:
@@ -256,7 +255,6 @@ def calculate_rv_500(ds_events: xr.Dataset) -> xr.DataArray:
     v500 = ds_events.v.sel(level=500)
     rel_vorticity = vorticity(u500, v500).metpy.dequantify()
     rel_vorticity.attrs.update({'units': 's-1', 'long_name': 'Relative Vorticity at 500 hPa'})
-    # FIXED: Drop the scalar 'level' coordinate which was causing a MergeError.
     return rel_vorticity.rename("rv_500").drop_vars('level', errors='ignore')
 
 def calculate_rv_250(ds_events: xr.Dataset) -> xr.DataArray:
@@ -264,7 +262,6 @@ def calculate_rv_250(ds_events: xr.Dataset) -> xr.DataArray:
     v250 = ds_events.v.sel(level=250)
     rel_vorticity = vorticity(u250, v250).metpy.dequantify()
     rel_vorticity.attrs.update({'units': 's-1', 'long_name': 'Relative Vorticity at 250 hPa'})
-    # FIXED: Drop the scalar 'level' coordinate which was causing a MergeError.
     return rel_vorticity.rename("rv_250").drop_vars('level', errors='ignore')
 
 def calculate_all_derived_variables(ds_events: xr.Dataset) -> xr.Dataset:
@@ -324,32 +321,26 @@ def save_events(
     out_path: Path,
     events_ds: xr.Dataset,
     period_details: Dict[str, Any],
-    scale_type: str,
-    mode: str = 'w',
-    encoding: Optional[Dict] = None
+    scale_type: str
 ):
-    """Saves the individual processed events to a NetCDF file."""
-    if mode == 'w':
-        # If writing for the first time, include metadata
-        events_ds.attrs.update({
-            'description': f"MJJAS individual {scale_type}-scale events for derived single-level variables.",
-            'period_name': period_details['name'],
-            'period_start_year': period_details['start'],
-            'period_end_year': period_details['end'],
-            'history': f"Created on {pd.Timestamp.now(tz='UTC')}"
-        })
+    """
+    Saves the final, concatenated events dataset to a NetCDF file.
+    This function now only writes a new file, it does not append.
+    """
+    events_ds.attrs.update({
+        'description': f"MJJAS individual {scale_type}-scale events for derived single-level variables.",
+        'period_name': period_details['name'],
+        'period_start_year': period_details['start'],
+        'period_end_year': period_details['end'],
+        'history': f"Created on {pd.Timestamp.now(tz='UTC')}"
+    })
 
-    encoding_options = encoding if encoding is not None else \
-        {v: {'zlib': True, 'complevel': 4, '_FillValue': np.float32(1e20)} for v in events_ds.data_vars}
-
+    encoding_options = {v: {'zlib': True, 'complevel': 4, '_FillValue': np.float32(1e20)} for v in events_ds.data_vars}
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    events_ds.to_netcdf(out_path, mode=mode, encoding=encoding_options, unlimited_dims=['event'])
-
-    if mode == 'w':
-        logging.info(f"Wrote individual {scale_type} events to {out_path}")
-    else:
-        logging.info(f"Appended individual {scale_type} events to {out_path}")
+    # Write the file in one go. 'w' mode will overwrite if the file exists.
+    events_ds.to_netcdf(out_path, mode='w', encoding=encoding_options, unlimited_dims=['event'])
+    logging.info(f"Wrote all {events_ds.sizes['event']} individual {scale_type} events to {out_path}")
 
 
 def main():
@@ -410,8 +401,10 @@ def main():
     global_event_counts_accumulator: Optional[xr.DataArray] = None
     is_first_file_processed = False
 
-    synoptic_events_file_created = False
-    meso_events_file_created = False
+    # FIXED: Initialize lists to hold event datasets in memory.
+    # This implements the new strategy of collecting all data before writing to file.
+    all_synoptic_events = []
+    all_meso_events = []
 
     output_suffix_base = "_nomcs" if args.noMCS else ""
 
@@ -536,6 +529,7 @@ def main():
 
                     cell_total_event_timesteps += event_data_from_file.sizes['event']
 
+                    # FIXED: Instead of saving to file in a loop, append the processed chunk to a list.
                     n_events_in_chunk = synoptic_vars.dims['event']
                     if n_events_in_chunk > 0 and not args.noMCS:
                         event_coords = {"event": synoptic_vars.event}
@@ -546,21 +540,12 @@ def main():
                         synoptic_vars['event_weather_type'] = event_wt
                         synoptic_vars['event_time_offset'] = event_offset
                         synoptic_vars['event_target_month'] = event_month
+                        all_synoptic_events.append(synoptic_vars)
 
                         meso_vars['event_weather_type'] = event_wt
                         meso_vars['event_time_offset'] = event_offset
                         meso_vars['event_target_month'] = event_month
-
-                        output_synoptic_events_filename = args.output_dir / f"events_synoptic_{args.region}_{period_info['name']}{output_suffix_base}.nc"
-                        syno_mode = 'a' if synoptic_events_file_created else 'w'
-                        save_events(output_synoptic_events_filename, synoptic_vars, period_info, 'synoptic', mode=syno_mode)
-                        synoptic_events_file_created = True
-
-                        output_meso_events_filename = args.output_dir / f"events_meso_{args.region}_{period_info['name']}{output_suffix_base}.nc"
-                        meso_mode = 'a' if meso_events_file_created else 'w'
-                        save_events(output_meso_events_filename, meso_vars, period_info, 'meso', mode=meso_mode)
-                        meso_events_file_created = True
-
+                        all_meso_events.append(meso_vars)
 
                 if cell_synoptic_sums is not None and is_first_file_processed:
                     wt_idx = weather_types_to_process.index(wt_value)
@@ -580,6 +565,7 @@ def main():
              logging.info("This is likely because no events were found in the input CSV for the specified period/months.")
         sys.exit(1)
 
+    # --- Calculate and Save Final Mean Composites ---
     if lat_coord_values is not None and lon_coord_values is not None and global_event_counts_accumulator is not None:
         final_synoptic_means = {}
         final_meso_means = {}
@@ -603,8 +589,24 @@ def main():
     else:
         logging.warning("Global accumulators not fully initialized. Skipping saving of mean composites.")
 
-    if not synoptic_events_file_created and not args.noMCS:
-        logging.warning("No individual events were processed to save.")
+    # FIXED: Save all collected individual events at the end of the script.
+    if not args.noMCS:
+        if all_synoptic_events:
+            logging.info(f"Concatenating {len(all_synoptic_events)} synoptic event chunks...")
+            final_synoptic_ds = xr.concat(all_synoptic_events, dim='event')
+            output_synoptic_events_filename = args.output_dir / f"events_synoptic_{args.region}_{period_info['name']}{output_suffix_base}.nc"
+            save_events(output_synoptic_events_filename, final_synoptic_ds, period_info, 'synoptic')
+        else:
+            logging.warning("No individual synoptic events were processed to save.")
+
+        if all_meso_events:
+            logging.info(f"Concatenating {len(all_meso_events)} meso event chunks...")
+            final_meso_ds = xr.concat(all_meso_events, dim='event')
+            output_meso_events_filename = args.output_dir / f"events_meso_{args.region}_{period_info['name']}{output_suffix_base}.nc"
+            save_events(output_meso_events_filename, final_meso_ds, period_info, 'meso')
+        else:
+            logging.warning("No individual meso events were processed to save.")
+
 
     logging.info("Processing completed.")
 
