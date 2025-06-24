@@ -50,6 +50,7 @@ def main_angle_calculation():
     print(f"Loading full track data from {args.input_csv}...")
     try:
         df_full = pd.read_csv(args.input_csv)
+        breakpoint()
     except FileNotFoundError:
         print(f"ERROR: Input CSV file '{args.input_csv}' not found.")
         return
@@ -169,6 +170,8 @@ def main_angle_calculation():
         print(f"ERROR: Regions file '{args.regions_file}' not found. Cannot create regional files.")
         return
     
+    df_full = df_full[df_full['datetime'].dt.month.isin([5, 6, 7, 8, 9])]  # Only keep months from May to Sep; To avoid missmatches between track_numbers with composite.csv
+
     for region_name, region_bounds in regions_data.items():
         print(f"\nProcessing region: {region_name}")
         
