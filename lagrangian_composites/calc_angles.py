@@ -9,6 +9,7 @@ from pathlib import Path # For easier path manipulation
 KM_PER_DEG_LAT = 111.0
 KM_PER_DEG_LON_EQUATOR = 111.320
 ZERO_MOVEMENT_PLACEHOLDER = -999.0  # Special value for atan2(0,0) cases before filling
+MONTHS_TO_INCLUDE = [5, 6, 7, 8, 9]  # TODO: discuss with Douglas
 
 # --- Helper Function: get_displacement_km ---
 def get_displacement_km(p_start, p_end):
@@ -43,6 +44,14 @@ def extract_mcs_initiation_data(input_csv_with_angles_path, output_csv_initiatio
     print(f"  Saved {len(initiation_df)} MCS initiation entries to {Path(output_csv_initiation_path).name}")
     return initiation_df
 
+def extract_max_precipitation_datetime(df):
+    """Gets a pandas dataframe and only keeps the datetime for each unique track_number with the
+    maximum total_precip"""
+
+    idx = df.groupby('track_number')['total_precip'].idxmax()
+
+    return df.loc[idx]
+
 # --- Main Angle Calculation Function ---
 def main():
     """
@@ -52,7 +61,6 @@ def main():
     parser = argparse.ArgumentParser(description="Calculate MCS movement angles and filter tracks by initiation location and time.")
     parser.add_argument("--input_csv", default="../csv/mcs_EUR_index.csv", help="Input CSV file with raw MCS track data.")
     parser.add_argument("--output_dir", default="./csv", help="Output directory for all processed regional CSV files.")
-    parser.add_argument("--regions_file", default="../regions.yaml", help="YAML file defining all geographic regions to be processed.")
     args = parser.parse_args()
 
     # 1. Load Full Track Data
@@ -64,6 +72,7 @@ def main():
         return
         
     df_full['datetime'] = pd.to_datetime(df_full['datetime'])
+    df_full = df_full[df_full['datetime'].dt.month.isin(MONTHS_TO_INCLUDE)].copy()
     df_full['angle_of_movement'] = np.nan
 
     # Filter to remove single-point tracks before any processing.
@@ -78,12 +87,13 @@ def main():
     else:
         print("  No single-point tracks found.")
 
+    
     # 2. Calculate Angles for ALL remaining valid tracks
     grouped_tracks = df_full.groupby('track_number')
     processed_tracks_count = 0
     print(f"Processing {len(grouped_tracks)} total multi-point track IDs...")
 
-    all_calculated_angles_series_for_df_full = []
+    all_calculated_angles_series_for_df = []
 
     for track_id, group_df in grouped_tracks:
         track_segment_df = group_df.sort_values(by='datetime').reset_index(drop=True)
@@ -148,7 +158,7 @@ def main():
             current_segment_angles_values = temp_final_angles
 
         original_indices = group_df.sort_values(by='datetime').index
-        all_calculated_angles_series_for_df_full.append(pd.Series(current_segment_angles_values, index=original_indices))
+        all_calculated_angles_series_for_df.append(pd.Series(current_segment_angles_values, index=original_indices))
         
         processed_tracks_count += 1
         if processed_tracks_count % 500 == 0:
@@ -156,70 +166,17 @@ def main():
 
     print(f"Finished angle calculation for all {processed_tracks_count} tracks.")
 
-    if all_calculated_angles_series_for_df_full:
-        for series_with_orig_indices in all_calculated_angles_series_for_df_full:
+    if all_calculated_angles_series_for_df:
+        for series_with_orig_indices in all_calculated_angles_series_for_df:
             df_full['angle_of_movement'].update(series_with_orig_indices)
 
-    # 3. Post-calculation: Filter by initiation location and save files
-    print("\n--- Filtering tracks based on initiation location ---")
-    
-    # Step 1: Find the initiation (first chronological point) for EVERY track.
-    print("Finding all track initiation points...")
-    df_full_sorted = df_full.sort_values(['track_number', 'datetime'])
-    df_initiations = df_full_sorted.groupby('track_number', as_index=False).first()
-    print(f"  Found {len(df_initiations)} unique tracks in the original dataset.")
+    df_max_precip = extract_max_precipitation_datetime(df_full)
+    df_max_precip_sorted = df_max_precip.sort_values(['datetime'])
 
-    # Step 2: From the initiation points, keep only those that occurred in MJJAS.
-    df_initiations_mjas = df_initiations[df_initiations['datetime'].dt.month.isin([5, 6, 7, 8, 9])].copy()
-    print(f"  Found {len(df_initiations_mjas)} tracks that initiated in MJJAS.")
 
-    # Load region definitions
-    try:
-        with open(args.regions_file, 'r') as f:
-            regions_data = yaml.safe_load(f)
-        print(f"Loaded {len(regions_data)} regions from {args.regions_file}")
-    except FileNotFoundError:
-        print(f"ERROR: Regions file '{args.regions_file}' not found. Cannot create regional files.")
-        return
-
-    # Loop through each defined region to perform the filtering
-    for region_name, region_bounds in regions_data.items():
-        print(f"\nProcessing region: {region_name}")
-
-        # Step 3: Filter the MJJAS initiations to find which ones are inside THIS region's bounds.
-        region_initiations = df_initiations_mjas[
-            (df_initiations_mjas['center_lon'] >= region_bounds['lon_min']) &
-            (df_initiations_mjas['center_lon'] <= region_bounds['lon_max']) &
-            (df_initiations_mjas['center_lat'] >= region_bounds['lat_min']) &
-            (df_initiations_mjas['center_lat'] <= region_bounds['lat_max'])
-        ]
-
-        # Step 4: Get the unique track numbers that initiated in this region.
-        tracks_initiated_in_region = region_initiations['track_number'].unique()
-
-        if len(tracks_initiated_in_region) == 0:
-            print(f"  No tracks found that initiated in '{region_name}' during MJJAS. Skipping.")
-            continue
-        
-        print(f"  Found {len(tracks_initiated_in_region)} tracks that initiated in this region during MJJAS.")
-
-        # Step 5: Go back to the original df_full and get the ENTIRE history for these valid tracks.
-        df_region_output = df_full[df_full['track_number'].isin(tracks_initiated_in_region)].copy()
-        
-        # Sort the final output for consistency
-        df_region_output = df_region_output.sort_values(by=['track_number', 'datetime'])
-        
-        # Define output paths for this specific region
-        output_csv_all_steps_path = Path(args.output_dir) / f"mcs_index_with_angles_{region_name}.csv"
-        output_csv_initiation_path = Path(args.output_dir) / f"mcs_initiation_dates_angles_{region_name}.csv"
-
-        # Save the filtered data (full track histories) for the region
-        Path(output_csv_all_steps_path).parent.mkdir(parents=True, exist_ok=True)
-        df_region_output.to_csv(output_csv_all_steps_path, index=False, float_format='%.3f')
-        print(f"  Saved {len(df_region_output)} total track points to {Path(output_csv_all_steps_path).name}")
-
-        # This function is now correctly used, as the input CSV contains only tracks that initiated in the region.
-        extract_mcs_initiation_data(output_csv_all_steps_path, output_csv_initiation_path)
+    # Save dataframe
+    output_filepath = Path(args.output_dir) / "meso_composite_events.csv"
+    df_max_precip_sorted.to_csv(output_filepath)
 
     print("\nScript finished successfully.")
 
