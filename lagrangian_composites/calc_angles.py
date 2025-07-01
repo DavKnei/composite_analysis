@@ -10,6 +10,8 @@ KM_PER_DEG_LAT = 111.0
 KM_PER_DEG_LON_EQUATOR = 111.320
 ZERO_MOVEMENT_PLACEHOLDER = -999.0  # Special value for atan2(0,0) cases before filling
 MONTHS_TO_INCLUDE = [5, 6, 7, 8, 9]  # TODO: discuss with Douglas
+ERA5_BOUNDS = {'lat_min': 25, 'lon_min': -10, 'lat_max': 65, 'lon_max': 35}
+CUTOUT_BOX_SIZE_KM = 800
 
 # --- Helper Function: get_displacement_km ---
 def get_displacement_km(p_start, p_end):
@@ -51,6 +53,57 @@ def extract_max_precipitation_datetime(df):
     idx = df.groupby('track_number')['total_precip'].idxmax()
 
     return df.loc[idx]
+
+def filter_events_by_domain_bounds(df, bounds, box_km):
+    """
+    Filters a dataframe of events to keep only those fully within data boundaries.
+
+    Args:
+        df (pd.DataFrame): DataFrame with 'center_lat' and 'center_lon'.
+        bounds (dict): Dictionary with 'lat_min', 'lon_min', 'lat_max', 'lon_max'.
+        box_km (int): The full size of the cutout box in kilometers.
+
+    Returns:
+        pd.DataFrame: The filtered DataFrame.
+    """
+    print(f"\nFiltering events to ensure they fit within the data domain...")
+    initial_count = len(df)
+    if initial_count == 0:
+        print("  No events to filter.")
+        return df
+
+    half_box_km = box_km / 2.0
+    df_copy = df.copy()
+
+    # Calculate required buffer distance in degrees for latitude
+    lat_buffer_deg = half_box_km / KM_PER_DEG_LAT
+
+    # Calculate required buffer distance in degrees for longitude (varies by latitude)
+    df_copy['lon_buffer_deg'] = half_box_km / (KM_PER_DEG_LON_EQUATOR * np.cos(np.radians(df_copy['center_lat'])))
+
+    # Define the "safe zone" for event centers
+    safe_lat_min = bounds['lat_min'] + lat_buffer_deg
+    safe_lat_max = bounds['lat_max'] - lat_buffer_deg
+    safe_lon_min = bounds['lon_min'] + df_copy['lon_buffer_deg']
+    safe_lon_max = bounds['lon_max'] - df_copy['lon_buffer_deg']
+
+    # Create the filter mask to identify events within the safe zone
+    is_in_bounds = (
+        (df_copy['center_lat'] >= safe_lat_min) &
+        (df_copy['center_lat'] <= safe_lat_max) &
+        (df_copy['center_lon'] >= safe_lon_min) &
+        (df_copy['center_lon'] <= safe_lon_max)
+    )
+
+    filtered_df = df_copy[is_in_bounds].drop(columns=['lon_buffer_deg'])
+    final_count = len(filtered_df)
+    omitted_count = initial_count - final_count
+
+    print(f"  Initial event count: {initial_count}")
+    print(f"  Removed {omitted_count} events too close to the boundary.")
+    print(f"  Final event count for composite: {final_count}")
+
+    return filtered_df
 
 # --- Main Angle Calculation Function ---
 def main():
@@ -171,7 +224,14 @@ def main():
             df_full['angle_of_movement'].update(series_with_orig_indices)
 
     df_max_precip = extract_max_precipitation_datetime(df_full)
-    df_max_precip_sorted = df_max_precip.sort_values(['datetime'])
+    
+    # Filter the max precipitation events to ensure they are within the domain bounds
+    df_filtered = filter_events_by_domain_bounds(
+        df=df_max_precip,
+        bounds=ERA5_BOUNDS,
+        box_km=CUTOUT_BOX_SIZE_KM
+    )
+    df_max_precip_sorted = df_filtered.sort_values(['datetime'])
 
 
     # Save dataframe
