@@ -58,46 +58,54 @@ def main():
     parser.add_argument("--output_dir", default="/home/dkn/mesocomposites/ERA5/", help="Directory to save the final composite NetCDF files.")
     args = parser.parse_args()
 
-   # --- Setup Directories and Load Angle Data ---
+   # --- Setup Directories and Paths ---
     input_dir = Path(args.temp_dir)
     rotated_temp_dir = Path(args.temp_dir_rotated)
     output_dir = Path(args.output_dir)
     rotated_temp_dir.mkdir(parents=True, exist_ok=True)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    output_rotated_events_file = output_dir / "meso_rotated_events.nc"
-    output_composite_file = output_dir / "mesocomp_thermodynamic_composite.nc"
+    # Dynamically determine output filename from the input CSV
+    csv_path = Path(args.csv_path)
+    output_composite_file = output_dir / f"{csv_path.stem}.nc"
 
-    print("--- Starting Rotation and Composite Generation ---")
-    
+    print(f"--- Starting Composite Generation for {csv_path.name} ---")
+
     try:
-        print(f"Loading angles from {args.csv_path}...")
-        # Load the CSV and set track_number as the index for fast lookups
-        events_df = pd.read_csv(args.csv_path).set_index('track_number')
+        print(f"Loading event list from {csv_path}...")
+        events_df = pd.read_csv(csv_path)
+        # Create a version with track_number as index for fast angle lookups
+        events_with_index = events_df.set_index('track_number')
     except (FileNotFoundError, KeyError) as e:
         print(f"ERROR: Could not load or parse the required CSV file. Please check the path and format. Details: {e}")
         return
 
     # --- Main Processing Loop ---
-    event_files = sorted(list(input_dir.glob("event_*.nc")))
-    if not event_files:
-        print(f"WARNING: No event files found in {input_dir}. Exiting.")
-        return
-
-    print(f"Found {len(event_files)} event files to process.")
-    pbar = tqdm(event_files, desc="Rotating Events")
-    for event_file_path in pbar:
+    # This list will hold the paths to the rotated files needed for this specific composite
+    files_for_composite = []
+    
+    print(f"Processing {len(events_df)} events specified in the CSV...")
+    pbar = tqdm(events_df.itertuples(), desc="Checking & Rotating Events", total=len(events_df))
+    for event in pbar:
+        track_number = event.track_number
+        rotated_file_path = rotated_temp_dir / f"event_{track_number}_rotated.nc"
+        source_file_path = input_dir / f"event_{track_number}.nc"
+        
+        # 1. Check if the required rotated file already exists
+        if rotated_file_path.exists():
+            files_for_composite.append(rotated_file_path)
+            continue
+            
+        # 2. If not, create it from the source file
         try:
-            track_number = int(event_file_path.stem.split('_')[-1])
-            rotated_file_path = rotated_temp_dir / f"{event_file_path.stem}_rotated.nc"
-
-            if rotated_file_path.exists():
+            if not source_file_path.exists():
+                print(f"\nWARNING: Source file not found for Track #{track_number}. Skipping.")
                 continue
 
             # Look up the angle from the DataFrame
-            event_angle_degrees = events_df.loc[track_number, 'angle_of_movement']
+            event_angle_degrees = events_with_index.loc[track_number, 'angle_of_movement']
 
-            with xr.open_dataset(event_file_path) as ds_event_source:
+            with xr.open_dataset(source_file_path) as ds_event_source:
                 rotated_ds = rotate_centered_grid(
                     ds_event_source,
                     event_angle_degrees,
@@ -105,30 +113,29 @@ def main():
                     RELATIVE_COORDS_KM
                 )
                 if rotated_ds:
-                    # Add metadata to the rotated file
                     rotated_ds = rotated_ds.assign_coords(
                         event_datetime=ds_event_source.event_datetime,
                         angle_of_movement=event_angle_degrees
                     )
                     rotated_ds.to_netcdf(rotated_file_path)
+                    files_for_composite.append(rotated_file_path)
 
         except KeyError:
             print(f"\nWARNING: Could not find angle for Track #{track_number} in the CSV file. Skipping.")
             continue
         except Exception as e:
-            print(f"\nERROR: Failed to process {event_file_path.name}. Reason: {e}")
+            print(f"\nERROR: Failed to process {source_file_path.name}. Reason: {e}")
 
     # --- Final Aggregation Step ---
     print("\n-------------------------------------------------")
-    rotated_files_list = sorted(list(rotated_temp_dir.glob("*_rotated.nc")))
-    if not rotated_files_list:
-        print("No events were successfully rotated. No output file will be created.")
+    if not files_for_composite:
+        print("No events were successfully found or processed. No output file will be created.")
         return
         
-    print(f"Aggregating {len(rotated_files_list)} successfully rotated events...")
+    print(f"Aggregating {len(files_for_composite)} successfully rotated events...")
     
     combined_ds = xr.open_mfdataset(
-        rotated_files_list,
+        files_for_composite,
         concat_dim="track_number",
         combine="nested"
     ).chunk({'track_number': 100})
@@ -138,7 +145,7 @@ def main():
         'x_relative': 'distance_across_motion_km'
     })
 
-    print(f"\nCalculating the final composite (mean of all events: n={len(combined_ds.track_number)})...")
+    print(f"\nCalculating the final composite (mean of all events: n={len(combined_ds.track_number)}/{len(events_df)})...")
     composite_ds = combined_ds.mean(dim='track_number', keep_attrs=True)
     
     composite_ds.to_netcdf(output_composite_file)
