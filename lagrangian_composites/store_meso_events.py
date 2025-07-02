@@ -18,10 +18,9 @@ import logging
 import time
 
 # --- CONFIGURATION AND CONSTANTS ---
-DEFAULT_CSV_PATH = "../csv/mcs_EUR_filtered_by_origin_and_region.csv"
+DEFAULT_CSV_PATH = "./csv/meso_composite_events.csv"
 DEFAULT_ERA5_PATH = "/reloclim/dkn/data/ERA5/pressure_levels/merged_files"
 DEFAULT_OUTPUT_PATH = "/home/dkn/mesocomposites/ERA5/mcs_events_data_for_composites.nc"
-MONTHS_TO_INCLUDE = [6, 7, 8]  # for now only use JJA TODO: discuss with Douglas
 
 # Define the common grid based on the peer-reviewed script
 BOX_SIZE_KM = 400 * 2 # Using a larger box (800km)
@@ -81,6 +80,7 @@ def parse_arguments():
     parser = argparse.ArgumentParser(description="Extract ERA5 data for MCS events from pre-merged files.")
     parser.add_argument('--csv_path', type=str, default=DEFAULT_CSV_PATH, help='Path to the MCS event index CSV file.')
     parser.add_argument('--era5_path', type=str, default=DEFAULT_ERA5_PATH, help='Base directory where merged ERA5 NetCDF files are stored.')
+    parser.add_argument('--temp_dir', type=str, default="/home/dkn/mesocomposites/ERA5/temp_files/", help='Directory for temporary event files.')
     parser.add_argument('--output_path', type=str, default=DEFAULT_OUTPUT_PATH, help='Path for the final output NetCDF file.')
     return parser.parse_args()
 
@@ -96,20 +96,14 @@ def create_event_dataset(args):
     logging.info("Step 1: Loading and filtering MCS event data...")
     events_df = pd.read_csv(args.csv_path)
     events_df['datetime'] = pd.to_datetime(events_df['datetime']).dt.round('H')
-    
-    initial_count = len(events_df)
-    events_df = events_df[events_df['datetime'].dt.month.isin(MONTHS_TO_INCLUDE)].copy()
-    if events_df.empty:
-        logging.warning("No events found in the specified months. Exiting.")
-        return
-    
     events_df['year_month'] = events_df['datetime'].dt.strftime('%Y-%m')
-    logging.info(f"Filtered events from {initial_count} to {len(events_df)} based on months: {MONTHS_TO_INCLUDE}")
 
-    logging.info("Step 2: Grouping events by month for processing...")
+    logging.info("Step 2: Preparing temporary directory and grouping events...")
+    TEMP_DIR = Path(args.temp_dir)
+    TEMP_DIR.mkdir(parents=True, exist_ok=True)
+    logging.info(f"Temporary files will be stored in: {TEMP_DIR}")
+
     monthly_groups = events_df.groupby('year_month')
-    all_centered_events = []
-    all_event_metadata = []
 
     logging.info(f"Step 3 & 4: Processing {len(monthly_groups)} months...")
     for year_month, month_group_df in tqdm(monthly_groups, desc="Total Progress"):
@@ -128,42 +122,51 @@ def create_event_dataset(args):
                 
                 for _, event in time_group_df.iterrows():
                     try:
-                        # Call the new, highly optimized centering function
+                        track_number = event['track_number']
+                        temp_file_path = TEMP_DIR / f"event_{track_number}.nc"
+
+                        if temp_file_path.exists():
+                            continue
+
                         centered_ds = center_grid_projection_optimized(
                             ds_time_slice,
                             event['center_lat'],
                             event['center_lon'],
                             RELATIVE_COORDS_KM,
-                            RELATIVE_COORDS_KM,
+                            RELATIVE_COORDS_KM
                         )
-
-                        all_centered_events.append(centered_ds)
-                        all_event_metadata.append({
-                            'event_datetime': event_time, 'track_number': event['track_number'],
-                            'event_center_lat': event['center_lat'], 'event_center_lon': event['center_lon'],
+                        
+                        temp_ds = centered_ds.expand_dims('track_number')
+                        temp_ds = temp_ds.assign_coords({
+                            'track_number': ('track_number', [track_number]),
+                            'event_datetime': ('track_number', [event_time]),
+                            'event_center_lat': ('track_number', [event['center_lat']]),
+                            'event_center_lon': ('track_number', [event['center_lon']]),
                         })
+                        temp_ds.to_netcdf(temp_file_path)
+
                     except Exception as e_inner:
-                        logging.warning(f"Skipped centering for event at {event_time}. Reason: {e_inner}")
+                        logging.warning(f"Skipped saving temp file for event at {event_time} (Track: {event.get('track_number', 'N/A')}). Reason: {e_inner}")
 
             except Exception as e_outer:
                 logging.warning(f"Could not load data for time slice {event_time}. Skipping {len(time_group_df)} events. Reason: {e_outer}")
     
-    if not all_centered_events:
-        logging.warning("No events were successfully processed. No output file will be created.")
+    logging.info("Step 5: Combining all temporary event files from disk...")
+    temp_files = sorted(list(TEMP_DIR.glob("event_*.nc")))
+    
+    if not temp_files:
+        logging.warning("No temporary event files were found or created. No output file will be created.")
     else:
-        logging.info("Step 5: Combining all processed events into a single dataset...")
-        final_ds = xr.concat(all_centered_events, dim='event_index')
-        meta_df = pd.DataFrame(all_event_metadata)
-        final_ds = final_ds.assign_coords({
-            'event_index': ('event_index', np.arange(len(all_centered_events))),
-            'track_number': ('event_index', meta_df['track_number'].values),
-            'event_datetime': ('event_index', meta_df['event_datetime'].values),
-            'event_center_lat': ('event_index', meta_df['event_center_lat'].values),
-            'event_center_lon': ('event_index', meta_df['event_center_lon'].values),
-        })
-        logging.info(f"Final dataset created with {len(final_ds.event_index)} events.")
+        logging.info(f"Found {len(temp_files)} event files to combine.")
+        combined_ds = xr.open_mfdataset(
+            temp_files,
+            combine="by_coords",
+            engine="netcdf4"
+        )
+
+        logging.info("Rechunking data for memory-efficient save...")
+        final_ds = combined_ds.chunk({'track_number': 100})
         
-        # Remove the problematic metpy_crs coordinate before saving if it exists
         if 'metpy_crs' in final_ds.coords:
             final_ds = final_ds.drop_vars('metpy_crs', errors='ignore')
         
@@ -173,12 +176,12 @@ def create_event_dataset(args):
         logging.info("✅ Success! Output file saved.")
 
     total_attempted = len(events_df)
-    total_processed = len(all_centered_events)
+    total_processed = len(list(TEMP_DIR.glob("event_*.nc")))
     total_skipped = total_attempted - total_processed
     logging.info("\n" + "="*50 + "\nProcessing Summary\n" + "="*50)
     logging.info(f"Total events attempted: {total_attempted}")
     logging.info(f"Successfully processed and saved: {total_processed}")
-    logging.info(f"Skipped due to errors: {total_skipped}")
+    logging.info(f"Skipped due to errors or already processed: {total_skipped}")
     logging.info("="*50)
 
 if __name__ == '__main__':
