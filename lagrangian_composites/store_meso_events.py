@@ -2,31 +2,132 @@
 Script to extract motion-centered data cutouts for Mesoscale Convective System (MCS)
 events from ERA5 data.
 
-VERSION 7: Implements a highly optimized one-step interpolation for the
-projection-based centering. This dramatically improves performance by avoiding
-a costly intermediate regridding step.
+- The script now checks for the existence of the total-field and meso-field files
+  independently. This allows it to create missing meso files even if the total
+  field file from a previous run already exists.
+- Corrects the end-of-run summary to accurately report the work done in the
+  current session, rather than counting all files on disk.
 """
 import pandas as pd
 import xarray as xr
 import numpy as np
 import pyproj
-import metpy.xarray
 from pathlib import Path
 from tqdm import tqdm
 import argparse
 import logging
-import time
+from scipy.fft import fft2, ifft2, fftfreq
 
 # --- CONFIGURATION AND CONSTANTS ---
-DEFAULT_CSV_PATH = "./csv/meso_composite_events.csv"
+DEFAULT_CSV_PATH = "./csv/event_centered_composite.csv"
 DEFAULT_ERA5_PATH = "/reloclim/dkn/data/ERA5/pressure_levels/merged_files"
-DEFAULT_OUTPUT_PATH = "/home/dkn/mesocomposites/ERA5/mcs_events_data_for_composites.nc"
 
 # Define the common grid based on the peer-reviewed script
 BOX_SIZE_KM = 400 * 2 # Using a larger box (800km)
 GRID_RESOLUTION_KM = 25
 NUM_GRID_POINTS = int(BOX_SIZE_KM / GRID_RESOLUTION_KM) + 1
 RELATIVE_COORDS_KM = np.linspace(-BOX_SIZE_KM / 2, BOX_SIZE_KM / 2, NUM_GRID_POINTS)
+
+# --- NEW: Configuration for the spectral filter ---
+# Wavelength (in km) for separating synoptic and meso scales.
+# Features larger than this are considered synoptic.
+CUTOFF_WAVELENGTH_KM = 1000.0
+
+
+def spectral_filter_2d(data_array: xr.DataArray, cutoff_wavelength_km: float) -> xr.DataArray:
+    """
+    Applies a 2D low-pass Gaussian filter to a 2D DataArray on a lat/lon grid.
+    This function is designed to isolate the synoptic-scale component of a field.
+    """
+    if data_array.ndim != 2 or 'latitude' not in data_array.dims or 'longitude' not in data_array.dims:
+        raise ValueError("Input must be a 2D DataArray with 'latitude' and 'longitude' dimensions.")
+
+    ny, nx = data_array.shape
+    lat_dim, lon_dim = 'latitude', 'longitude'
+
+    # Earth radius in meters
+    R = 6371000.0
+    
+    # Calculate grid spacing in meters, being careful with units
+    dlon_deg = np.abs(data_array[lon_dim].diff(dim=lon_dim).mean().item())
+    dlat_deg = np.abs(data_array[lat_dim].diff(dim=lat_dim).mean().item())
+    mean_lat_rad = np.deg2rad(data_array[lat_dim].mean().item())
+    dx = R * np.cos(mean_lat_rad) * np.deg2rad(dlon_deg)
+    dy = R * np.deg2rad(dlat_deg)
+
+    # Calculate wavenumbers for the FFT
+    kx = 2 * np.pi * fftfreq(nx, d=dx)
+    ky = 2 * np.pi * fftfreq(ny, d=dy)
+    kxx, kyy = np.meshgrid(kx, ky)
+    k_magnitude = np.sqrt(kxx**2 + kyy**2)
+
+    # Define the filter transfer function (Gaussian)
+    lambda_half_m = cutoff_wavelength_km * 1000.0
+    k_half = (2 * np.pi) / lambda_half_m
+    # Add epsilon to avoid division by zero if k_half is zero
+    filter_mask = np.exp(-np.log(2) * (k_magnitude / (k_half + 1e-9))**2)
+
+    # Apply the filter using FFT
+    nan_mask = data_array.isnull()
+    filled_data = data_array.fillna(0).values
+    data_fft = fft2(filled_data)
+    filtered_fft = data_fft * filter_mask
+    filtered_data_values = np.real(ifft2(filtered_fft))
+
+    # Reconstruct the DataArray
+    filtered_da = xr.DataArray(
+        filtered_data_values,
+        coords=data_array.coords,
+        dims=data_array.dims,
+        attrs=data_array.attrs
+    )
+    return filtered_da.where(~nan_mask)
+
+def perform_scale_separation_on_slice(ds_slice: xr.Dataset) -> xr.Dataset:
+    """
+    Applies scale separation to a full 3D (pressure_level, lat, lon) dataset slice.
+    Returns the mesoscale perturbation field.
+    """
+    synoptic_ds_list = []
+    # Identify variables that could potentially be filtered
+    vars_to_check = [v for v, da in ds_slice.data_vars.items() if 'latitude' in da.dims and 'longitude' in da.dims]
+
+    for var_name in vars_to_check:
+        original_da = ds_slice[var_name]
+        
+        # Case 1: Handle 3D data (with a 'pressure_level' dimension) by applying the filter per pressure_level
+        if 'pressure_level' in original_da.dims and original_da.ndim == 3:
+            synoptic_levels = []
+            for pressure_level in original_da['pressure_level']:
+                data_2d = original_da.sel(pressure_level=pressure_level)
+                synoptic_2d = spectral_filter_2d(data_2d, CUTOFF_WAVELENGTH_KM)
+                synoptic_levels.append(synoptic_2d)
+            synoptic_da = xr.concat(synoptic_levels, dim='pressure_level')
+            synoptic_ds_list.append(synoptic_da.rename(var_name))
+
+        # Case 2: Handle 2D data (no 'pressure_level' dimension)
+        elif 'pressure_level' not in original_da.dims and original_da.ndim == 2:
+            synoptic_da = spectral_filter_2d(original_da, CUTOFF_WAVELENGTH_KM)
+            synoptic_ds_list.append(synoptic_da.rename(var_name))
+        
+        # Case 3: Skip any other variables that have lat/lon dims but are not the expected 2D/3D structure
+        else:
+            logging.info(f"Skipping filtering for variable '{var_name}' with unexpected dimensions: {original_da.dims}")
+            continue
+    
+    if not synoptic_ds_list:
+        logging.warning("No suitable variables were found/filtered for scale separation.")
+        return xr.Dataset(attrs=ds_slice.attrs)
+
+    ds_synoptic = xr.merge(synoptic_ds_list)
+    ds_meso = ds_slice - ds_synoptic
+    
+    ds_meso.attrs = ds_slice.attrs.copy()
+    ds_meso.attrs['processing_level'] = 'mesoscale_perturbation'
+    ds_meso.attrs['scale_separation_method'] = f'2D Gaussian low-pass filter (cutoff: {CUTOFF_WAVELENGTH_KM} km) and subtraction'
+    ds_meso.attrs['note'] = 'Mesoscale field derived by filtering on the original lat/lon grid before centering.'
+    
+    return ds_meso
 
 
 def center_grid_projection_optimized(ds_event_source, event_center_lat, event_center_lon,
@@ -38,57 +139,29 @@ def center_grid_projection_optimized(ds_event_source, event_center_lat, event_ce
     grid centered on an event. It uses a direct one-step interpolation for
     maximum performance.
     """
-    # Define the source CRS (standard lat/lon)
-    source_crs = pyproj.CRS("EPSG:4326") # WGS 84
-    
-    # Define the target CRS: an Azimuthal Equidistant projection centered on the event
+    source_crs = pyproj.CRS("EPSG:4326")
     target_crs_aeqd = pyproj.CRS(f"+proj=aeqd +lat_0={event_center_lat} +lon_0={event_center_lon} +ellps=sphere +units=m")
-
-    # Create a transformer to go from our target projection (in meters) back to the source lat/lon
     transformer_target_to_source = pyproj.Transformer.from_crs(target_crs_aeqd, source_crs, always_xy=True)
-
-    # Create a meshgrid of our simple target coordinates (in meters)
     target_x_m_coords, target_y_m_coords = target_x_km_coords * 1000.0, target_y_km_coords * 1000.0
     target_xx_m, target_yy_m = np.meshgrid(target_x_m_coords, target_y_m_coords)
-
-    # Use the transformer to find out where each point of our target grid falls
-    # in the original latitude/longitude coordinate system.
     lons_to_sample, lats_to_sample = transformer_target_to_source.transform(target_xx_m, target_yy_m)
-
-    # Create DataArrays for the sample points, which xarray's .interp() needs.
-    # The dimensions and coordinates must match our final desired output grid.
-    lons_da = xr.DataArray(
-        lons_to_sample, dims=('y_relative_km', 'x_relative_km'),
-        coords={'y_relative_km': target_y_km_coords, 'x_relative_km': target_x_km_coords}
-    )
-    lats_da = xr.DataArray(
-        lats_to_sample, dims=('y_relative_km', 'x_relative_km'),
-        coords={'y_relative_km': target_y_km_coords, 'x_relative_km': target_x_km_coords}
-    )
-
-    # Perform the single, direct interpolation from the source grid to our target grid.
-    ds_final_centered = ds_event_source.interp(
-        {source_lon_coord_name: lons_da, source_lat_coord_name: lats_da},
-        method="linear"
-    )
-        
+    lons_da = xr.DataArray(lons_to_sample, dims=('y_relative_km', 'x_relative_km'), coords={'y_relative_km': target_y_km_coords, 'x_relative_km': target_x_km_coords})
+    lats_da = xr.DataArray(lats_to_sample, dims=('y_relative_km', 'x_relative_km'), coords={'y_relative_km': target_y_km_coords, 'x_relative_km': target_x_km_coords})
+    ds_final_centered = ds_event_source.interp({source_lon_coord_name: lons_da, source_lat_coord_name: lats_da}, method="linear")
     return ds_final_centered
-
 
 def parse_arguments():
     """Parses command-line arguments."""
-    parser = argparse.ArgumentParser(description="Extract ERA5 data for MCS events from pre-merged files.")
+    parser = argparse.ArgumentParser(description="Extract ERA5 data for MCS events and perform scale separation.")
     parser.add_argument('--csv_path', type=str, default=DEFAULT_CSV_PATH, help='Path to the MCS event index CSV file.')
     parser.add_argument('--era5_path', type=str, default=DEFAULT_ERA5_PATH, help='Base directory where merged ERA5 NetCDF files are stored.')
-    parser.add_argument('--temp_dir', type=str, default="/home/dkn/mesocomposites/ERA5/temp_files/", help='Directory for temporary event files.')
-    parser.add_argument('--output_path', type=str, default=DEFAULT_OUTPUT_PATH, help='Path for the final output NetCDF file.')
+    parser.add_argument('--temp_dir', type=str, default="/home/dkn/mesocomposites/ERA5/temp_files/", help='Directory for temporary total-field event files.')
     return parser.parse_args()
 
 def reorder_lat(ds: xr.Dataset) -> xr.Dataset:
     """Ensure latitude is in ascending order."""
-    lat_coord_name = 'latitude' if 'latitude' in ds.coords else 'lat'
-    if lat_coord_name in ds.coords and ds[lat_coord_name].values.size > 1 and ds[lat_coord_name].values[0] > ds[lat_coord_name].values[-1]:
-        ds = ds.reindex({lat_coord_name: list(reversed(ds[lat_coord_name]))})
+    if 'latitude' in ds.coords and ds['latitude'].values.size > 1 and ds['latitude'].values[0] > ds['latitude'].values[-1]:
+        ds = ds.reindex({'latitude': list(reversed(ds['latitude']))})
     return ds
 
 def create_event_dataset(args):
@@ -98,90 +171,112 @@ def create_event_dataset(args):
     events_df['datetime'] = pd.to_datetime(events_df['datetime']).dt.round('H')
     events_df['year_month'] = events_df['datetime'].dt.strftime('%Y-%m')
 
-    logging.info("Step 2: Preparing temporary directory and grouping events...")
+    logging.info("Step 2: Preparing temporary directories...")
     TEMP_DIR = Path(args.temp_dir)
     TEMP_DIR.mkdir(parents=True, exist_ok=True)
-    logging.info(f"Temporary files will be stored in: {TEMP_DIR}")
+    logging.info(f"Total-field temporary files will be stored in: {TEMP_DIR}")
+    
+    TEMP_DIR_MESO = TEMP_DIR.parent / (TEMP_DIR.name + "_meso")
+    TEMP_DIR_MESO.mkdir(parents=True, exist_ok=True)
+    logging.info(f"Mesoscale perturbation files will be stored in: {TEMP_DIR_MESO}")
 
     monthly_groups = events_df.groupby('year_month')
+
+    events_processed_or_updated = 0
+    events_skipped = 0
 
     logging.info(f"Step 3 & 4: Processing {len(monthly_groups)} months...")
     for year_month, month_group_df in tqdm(monthly_groups, desc="Total Progress"):
         era5_file = Path(args.era5_path) / f"{year_month}.nc"
         if not era5_file.exists():
             logging.warning(f"Merged file not found: {era5_file}. Skipping all {len(month_group_df)} events for month {year_month}.")
+            events_skipped += len(month_group_df)
             continue
+            
         ds_month = xr.open_dataset(era5_file, chunks={'latitude': 240, 'longitude': 240})
         ds_month = reorder_lat(ds_month)
         
         events_by_time = month_group_df.groupby('datetime')
         
         for event_time, time_group_df in tqdm(events_by_time, desc=f"Processing {year_month}", leave=False):
+            
+            # Before loading any data, check if all required output files for this timestamp already exist.
+            track_numbers_for_time = time_group_df['track_number']
+            all_files_exist = all(
+                (TEMP_DIR / f"event_{tn}.nc").exists() and (TEMP_DIR_MESO / f"event_{tn}.nc").exists()
+                for tn in track_numbers_for_time
+            )
+            
+            if all_files_exist:
+                logging.debug(f"All {len(track_numbers_for_time)} event files for {event_time} already exist. Skipping computation.")
+                events_skipped += len(track_numbers_for_time)
+                continue # Proceed to the next event_time
+
             try:
                 ds_time_slice = ds_month.sel(valid_time=event_time).load()
+                logging.info(f"Performing scale separation for {event_time}...")
+                    
+                ds_meso_slice = perform_scale_separation_on_slice(ds_time_slice)
                 
                 for _, event in time_group_df.iterrows():
                     try:
                         track_number = event['track_number']
                         temp_file_path = TEMP_DIR / f"event_{track_number}.nc"
+                        meso_temp_file_path = TEMP_DIR_MESO / f"event_{track_number}.nc"
 
-                        if temp_file_path.exists():
+                        # This inner check is now for individual files and still useful
+                        # It handles cases where only one of the two files (total or meso) is missing.
+                        if temp_file_path.exists() and meso_temp_file_path.exists():
+                            # This logic is mostly superseded by the check above, but acts as a final safeguard.
                             continue
-
-                        centered_ds = center_grid_projection_optimized(
-                            ds_time_slice,
-                            event['center_lat'],
-                            event['center_lon'],
-                            RELATIVE_COORDS_KM,
-                            RELATIVE_COORDS_KM
-                        )
                         
-                        temp_ds = centered_ds.expand_dims('track_number')
-                        temp_ds = temp_ds.assign_coords({
-                            'track_number': ('track_number', [track_number]),
-                            'event_datetime': ('track_number', [event_time]),
-                            'event_center_lat': ('track_number', [event['center_lat']]),
-                            'event_center_lon': ('track_number', [event['center_lon']]),
-                        })
-                        temp_ds.to_netcdf(temp_file_path)
+                        events_processed_or_updated += 1
+
+                        # --- 1. Center and save the TOTAL field (if it doesn't exist) ---
+                        if not temp_file_path.exists():
+                            centered_ds = center_grid_projection_optimized(
+                                ds_time_slice, event['center_lat'], event['center_lon'],
+                                RELATIVE_COORDS_KM, RELATIVE_COORDS_KM
+                            )
+                            temp_ds = centered_ds.expand_dims('track_number').assign_coords({
+                                'track_number': ('track_number', [track_number]),
+                                'event_datetime': ('track_number', [event_time]),
+                                'event_center_lat': ('track_number', [event['center_lat']]),
+                                'event_center_lon': ('track_number', [event['center_lon']]),
+                            })
+                            temp_ds.to_netcdf(temp_file_path)
+
+                        # --- 2. Center and save the MESOSCALE field (if it doesn't exist) ---
+                        if not meso_temp_file_path.exists():
+                            centered_meso_ds = center_grid_projection_optimized(
+                                ds_meso_slice, event['center_lat'], event['center_lon'],
+                                RELATIVE_COORDS_KM, RELATIVE_COORDS_KM
+                            )
+                            temp_meso_ds = centered_meso_ds.expand_dims('track_number').assign_coords({
+                                'track_number': ('track_number', [track_number]),
+                                'event_datetime': ('track_number', [event_time]),
+                                'event_center_lat': ('track_number', [event['center_lat']]),
+                                'event_center_lon': ('track_number', [event['center_lon']]),
+                            })
+                            encoding = {var: {'zlib': True, 'complevel': 5} for var in temp_meso_ds.data_vars}
+                            temp_meso_ds.to_netcdf(meso_temp_file_path, encoding=encoding)
 
                     except Exception as e_inner:
                         logging.warning(f"Skipped saving temp file for event at {event_time} (Track: {event.get('track_number', 'N/A')}). Reason: {e_inner}")
 
+            except KeyError:
+                logging.warning(f"Time coordinate 'valid_time={event_time}' not found in file for {year_month}. Skipping {len(time_group_df)} events.")
             except Exception as e_outer:
-                logging.warning(f"Could not load data for time slice {event_time}. Skipping {len(time_group_df)} events. Reason: {e_outer}")
+                logging.warning(f"Could not process time slice {event_time}. Skipping {len(time_group_df)} events. Reason: {e_outer}")
     
-    logging.info("Step 5: Combining all temporary event files from disk...")
-    temp_files = sorted(list(TEMP_DIR.glob("event_*.nc")))
-    
-    if not temp_files:
-        logging.warning("No temporary event files were found or created. No output file will be created.")
-    else:
-        logging.info(f"Found {len(temp_files)} event files to combine.")
-        combined_ds = xr.open_mfdataset(
-            temp_files,
-            combine="by_coords",
-            engine="netcdf4"
-        )
-
-        logging.info("Rechunking data for memory-efficient save...")
-        final_ds = combined_ds.chunk({'track_number': 100})
-        
-        if 'metpy_crs' in final_ds.coords:
-            final_ds = final_ds.drop_vars('metpy_crs', errors='ignore')
-        
-        encoding = {var: {'zlib': True, 'complevel': 5} for var in final_ds.data_vars}
-        logging.info(f"Saving final dataset to: {args.output_path}")
-        final_ds.to_netcdf(args.output_path, encoding=encoding, mode='w')
-        logging.info("✅ Success! Output file saved.")
-
-    total_attempted = len(events_df)
-    total_processed = len(list(TEMP_DIR.glob("event_*.nc")))
-    total_skipped = total_attempted - total_processed
-    logging.info("\n" + "="*50 + "\nProcessing Summary\n" + "="*50)
-    logging.info(f"Total events attempted: {total_attempted}")
-    logging.info(f"Successfully processed and saved: {total_processed}")
-    logging.info(f"Skipped due to errors or already processed: {total_skipped}")
+    logging.info("="*50 + "\nEVENT EXTRACTION SUMMARY\n" + "="*50)
+    total_in_csv = len(events_df)
+    logging.info(f"Total events in CSV: {total_in_csv}")
+    logging.info(f"Processed or updated in this run: {events_processed_or_updated}")
+    logging.info(f"Skipped (already complete): {events_skipped}")
+    logging.info("✅ Success! Event file extraction complete.")
+    logging.info(f"Total-field files are in: {TEMP_DIR}")
+    logging.info(f"Mesoscale files are in: {TEMP_DIR_MESO}")
     logging.info("="*50)
 
 if __name__ == '__main__':
