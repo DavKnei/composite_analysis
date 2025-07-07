@@ -33,8 +33,8 @@ import csv
 from multiprocessing import Pool
 
 # Define the EURO-CORDEX boundaries
-LON_MIN = -20
-LON_MAX = 43
+LON_MIN = -10
+LON_MAX = 35
 LAT_MIN = 25
 LAT_MAX = 65
 
@@ -124,8 +124,10 @@ def process_file(file_path):
             # Compute precipitation-weighted center point
             total_precip = np.sum(track_precip)
             if total_precip > 0:
-                center_lat = np.sum(track_lats * track_precip) / total_precip
-                center_lon = np.sum(track_lons * track_precip) / total_precip
+                max_precip_index = np.argmax(track_precip)
+
+                center_lat = track_lats[max_precip_index]
+                center_lon = track_lons[max_precip_index]
             else:
                 center_lat = np.mean(track_lats)
                 center_lon = np.mean(track_lons)
@@ -171,7 +173,7 @@ def main():
     parser.add_argument(
         "--output",
         type=str,
-        default="/csv/mcs_EUR_index.csv",
+        default="./csv/mcs_EUR_index.csv",
         help="Output CSV file name",
     )
     parser.add_argument(
