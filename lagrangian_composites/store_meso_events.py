@@ -16,10 +16,18 @@ from pathlib import Path
 from tqdm import tqdm
 import argparse
 import logging
+import warnings
 from scipy.fft import fft2, ifft2, fftfreq
+
+warnings.filterwarnings(
+    "ignore",
+    message="Slicing is producing a large chunk."
+)
+
 
 # --- CONFIGURATION AND CONSTANTS ---
 DEFAULT_CSV_PATH = "./csv/event_centered_composite.csv"
+#DEFAULT_CSV_PATH = "./csv/debug.csv"
 DEFAULT_ERA5_PATH = "/reloclim/dkn/data/ERA5/pressure_levels/merged_files"
 
 # Define the common grid based on the peer-reviewed script
@@ -28,16 +36,22 @@ GRID_RESOLUTION_KM = 25
 NUM_GRID_POINTS = int(BOX_SIZE_KM / GRID_RESOLUTION_KM) + 1
 RELATIVE_COORDS_KM = np.linspace(-BOX_SIZE_KM / 2, BOX_SIZE_KM / 2, NUM_GRID_POINTS)
 
-# --- NEW: Configuration for the spectral filter ---
-# Wavelength (in km) for separating synoptic and meso scales.
-# Features larger than this are considered synoptic.
-CUTOFF_WAVELENGTH_KM = 1000.0
+# Wavelength where the filter response starts to roll off from 1.0.
+HIGH_PASS_WL_KM = 2000.0 # Corresponds to the 'top' of the curve.
+# Wavelength parameter that controls the steepness of the roll-off.
+LOW_PASS_WL_KM = 200.0  
 
 
-def spectral_filter_2d(data_array: xr.DataArray, cutoff_wavelength_km: float) -> xr.DataArray:
-    """
-    Applies a 2D low-pass Gaussian filter to a 2D DataArray on a lat/lon grid.
+
+def spectral_filter_2d(data_array: xr.DataArray, high_pass_wl_km: float, low_pass_wl_km: float) -> xr.DataArray:
+    """Applies the 2D Gaussian low-pass filter, as in <<Schaffer et al 2024>>
     This function is designed to isolate the synoptic-scale component of a field.
+
+    Args:
+        data_array: The 2D (or 3D with pressure_level) xr.DataArray to filter.
+        high_pass_wl_km: The wavelength (in km) where the filter response starts to roll off from 1.
+                         Corresponds to the 'top' of the filter curve.
+        low_pass_wl_km: The wavelength (in km) that controls the steepness of the filter roll-off.
     """
     if data_array.ndim != 2 or 'latitude' not in data_array.dims or 'longitude' not in data_array.dims:
         raise ValueError("Input must be a 2D DataArray with 'latitude' and 'longitude' dimensions.")
@@ -48,7 +62,7 @@ def spectral_filter_2d(data_array: xr.DataArray, cutoff_wavelength_km: float) ->
     # Earth radius in meters
     R = 6371000.0
     
-    # Calculate grid spacing in meters, being careful with units
+    # Calculate grid spacing in meters
     dlon_deg = np.abs(data_array[lon_dim].diff(dim=lon_dim).mean().item())
     dlat_deg = np.abs(data_array[lat_dim].diff(dim=lat_dim).mean().item())
     mean_lat_rad = np.deg2rad(data_array[lat_dim].mean().item())
@@ -61,11 +75,26 @@ def spectral_filter_2d(data_array: xr.DataArray, cutoff_wavelength_km: float) ->
     kxx, kyy = np.meshgrid(kx, ky)
     k_magnitude = np.sqrt(kxx**2 + kyy**2)
 
-    # Define the filter transfer function (Gaussian)
-    lambda_half_m = cutoff_wavelength_km * 1000.0
-    k_half = (2 * np.pi) / lambda_half_m
-    # Add epsilon to avoid division by zero if k_half is zero
-    filter_mask = np.exp(-np.log(2) * (k_magnitude / (k_half + 1e-9))**2)
+    # Convert wavelength parameters from km to meters
+    LP_m = low_pass_wl_km * 1000.0
+    HP_m = high_pass_wl_km * 1000.0
+    
+    # Wavenumber corresponding to the start of the roll-off
+    k_hp_m = (2 * np.pi) / HP_m
+
+    # --- This is the new filter definition from the paper ---
+    # The formula is F(k) = exp(-2 * ( (pi * LP / k_lp) * (k - k_hp) )**2) which simplifies
+    # to the below. Note: This formula is expressed in terms of wavenumber 'k'.
+    exponent = -2 * ((LP_m / 2.0) * (k_magnitude - k_hp_m))**2
+    
+    # The filter response is 1 for wavelengths longer than HP_m (i.e., k < k_hp_m)
+    # and follows the Gaussian curve for shorter wavelengths.
+    filter_mask = np.where(
+        k_magnitude < k_hp_m,
+        1.0,
+        np.exp(exponent)
+    )
+    # --- End of new filter definition ---
 
     # Apply the filter using FFT
     nan_mask = data_array.isnull()
@@ -100,14 +129,14 @@ def perform_scale_separation_on_slice(ds_slice: xr.Dataset) -> xr.Dataset:
             synoptic_levels = []
             for pressure_level in original_da['pressure_level']:
                 data_2d = original_da.sel(pressure_level=pressure_level)
-                synoptic_2d = spectral_filter_2d(data_2d, CUTOFF_WAVELENGTH_KM)
+                synoptic_2d = spectral_filter_2d(data_2d, HIGH_PASS_WL_KM, LOW_PASS_WL_KM)
                 synoptic_levels.append(synoptic_2d)
             synoptic_da = xr.concat(synoptic_levels, dim='pressure_level')
             synoptic_ds_list.append(synoptic_da.rename(var_name))
 
         # Case 2: Handle 2D data (no 'pressure_level' dimension)
         elif 'pressure_level' not in original_da.dims and original_da.ndim == 2:
-            synoptic_da = spectral_filter_2d(original_da, CUTOFF_WAVELENGTH_KM)
+            synoptic_da = spectral_filter_2d(original_da, HIGH_PASS_WL_KM, LOW_PASS_WL_KM)
             synoptic_ds_list.append(synoptic_da.rename(var_name))
         
         # Case 3: Skip any other variables that have lat/lon dims but are not the expected 2D/3D structure
@@ -124,7 +153,7 @@ def perform_scale_separation_on_slice(ds_slice: xr.Dataset) -> xr.Dataset:
     
     ds_meso.attrs = ds_slice.attrs.copy()
     ds_meso.attrs['processing_level'] = 'mesoscale_perturbation'
-    ds_meso.attrs['scale_separation_method'] = f'2D Gaussian low-pass filter (cutoff: {CUTOFF_WAVELENGTH_KM} km) and subtraction'
+    ds_meso.attrs['scale_separation_method'] = f'2D Gaussian filter (HP: {HIGH_PASS_WL_KM} km, LP: {LOW_PASS_WL_KM} km)'
     ds_meso.attrs['note'] = 'Mesoscale field derived by filtering on the original lat/lon grid before centering.'
     
     return ds_meso
