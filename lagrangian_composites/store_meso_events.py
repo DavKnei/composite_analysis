@@ -420,7 +420,7 @@ def create_event_dataset(args):
                     long_name="Relative Humidity",
                     note="Calculated from total (synoptic + mesoscale) fields.",
                 )
-                ds_meso_slice["vort"] = vort_meso.assign_attrs(
+                ds_meso_slice["rel_vort_meso"] = vort_meso.assign_attrs(
                     units="s**-1",
                     long_name="Mesoscale Relative Vorticity",
                     note="Calculated from mesoscale wind fields.",
