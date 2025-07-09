@@ -18,6 +18,7 @@ import argparse
 import logging
 import warnings
 from scipy.fft import fft2, ifft2, fftfreq
+from metpy.units import units
 import metpy.calc as mpcalc
 from metpy.package_tools import Exporter
 from metpy.units import process_units
@@ -79,6 +80,37 @@ def saturation_vapor_pressure(t):
 
 
 mpcalc.saturation_vapor_pressure = saturation_vapor_pressure
+
+def assign_units_from_attrs(ds):
+    """
+    Loops through a dataset, reads the 'units' attribute string, and
+    rebuilds the DataArray with unit-aware data (a pint.Quantity).
+    """
+    for var_name, da in ds.data_vars.items():
+        # Proceed only if the variable has a 'units' attribute and is not already unit-aware
+        if 'units' in da.attrs and not hasattr(da.data, 'units'):
+            unit_str = da.attrs['units']
+            try:
+                unit_obj = units(unit_str)
+                
+                # --- THIS IS THE CORRECT METHOD ---
+                # 1. Create a pint.Quantity by multiplying the numpy array by the unit object.
+                quantity = da.values * unit_obj
+                
+                # 2. Replace the variable in the dataset with a new DataArray containing this quantity.
+                ds[var_name] = xr.DataArray(
+                    data=quantity,
+                    coords=da.coords,
+                    dims=da.dims,
+                    attrs=da.attrs
+                )
+
+            except Exception as e:
+                logging.warning(
+                    f"Could not assign unit for '{var_name}'. "
+                    f"Unrecognized unit string: '{unit_str}'. Error: {e}"
+                )
+    return ds
 
 
 def spectral_filter_2d(
@@ -219,6 +251,14 @@ def perform_scale_separation_on_slice(ds_slice: xr.Dataset) -> xr.Dataset:
     ds_meso.attrs[
         "note"
     ] = "Mesoscale field derived by filtering on the original lat/lon grid before centering."
+
+    # Arithmetic can drop attributes. This loop copies them back from the original source.
+    for var in ds_meso.data_vars:
+        if var in ds_slice:
+            ds_meso[var].attrs = ds_slice[var].attrs.copy()
+    for var in ds_synoptic.data_vars:
+        if var in ds_slice:
+            ds_synoptic[var].attrs = ds_slice[var].attrs.copy()
 
     return ds_meso, ds_synoptic
 
@@ -380,6 +420,9 @@ def create_event_dataset(args):
                     ds_time_slice
                 )
 
+                ds_meso_slice = assign_units_from_attrs(ds_meso_slice)
+                ds_synoptic_slice = assign_units_from_attrs(ds_synoptic_slice)
+
                 ds_total_slice = (
                     (ds_meso_slice + ds_synoptic_slice)
                     .metpy.assign_crs(
@@ -387,12 +430,21 @@ def create_event_dataset(args):
                     )
                     .metpy.parse_cf()
                 )
+                for var in ds_total_slice.data_vars:  # Add units back to ds_total_slice
+                    if var in ds_time_slice:
+                        ds_total_slice[var].attrs = ds_time_slice[var].attrs.copy()
+                
+                ds_total_slice = assign_units_from_attrs(ds_total_slice)
 
                 # Calculate equivilant potential temperature
+                # STEP 1: Calculate dewpoint from pressure, temperature, and specific humidity.
+                dewpoint_total = mpcalc.dewpoint_from_specific_humidity(
+                    ds_total_slice['pressure_level'], ds_total_slice['t'], ds_total_slice['q']
+                )
+
+                # STEP 2: Now use the calculated dewpoint to get equivalent potential temperature.
                 theta_e_total = mpcalc.equivalent_potential_temperature(
-                    ds_total_slice["pressure_level"],
-                    ds_total_slice["t"],
-                    ds_total_slice["q"],
+                    ds_total_slice['pressure_level'], ds_total_slice['t'], dewpoint_total
                 )
 
                 # Calculate relative humidity with monkey patches function, similar to ERA5
@@ -469,6 +521,9 @@ def create_event_dataset(args):
                                     ),
                                 }
                             )
+
+                            if 'metpy_crs' in temp_synoptic_ds:
+                                temp_synoptic_ds = temp_synoptic_ds.drop_vars('metpy_crs')
                             # Save the synoptic file
                             temp_synoptic_ds.to_netcdf(synoptic_temp_file_path)
 
@@ -497,6 +552,10 @@ def create_event_dataset(args):
                                     ),
                                 }
                             )
+
+                            if 'metpy_crs' in temp_meso_ds:
+                                temp_meso_ds = temp_meso_ds.drop_vars('metpy_crs')
+
                             encoding = {
                                 var: {"zlib": True, "complevel": 5}
                                 for var in temp_meso_ds.data_vars
