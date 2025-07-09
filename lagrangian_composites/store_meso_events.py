@@ -1,4 +1,4 @@
-""" 1151842
+""" 1631307 nohup
 Script to extract motion-centered data cutouts for Mesoscale Convective System (MCS)
 events from ERA5 data.
 
@@ -17,12 +17,18 @@ from tqdm import tqdm
 import argparse
 import logging
 import warnings
-from scipy.fft import fft2, ifft2, fftfreq
 from metpy.units import units
 import metpy.calc as mpcalc
 from metpy.package_tools import Exporter
 from metpy.units import process_units
 from metpy.xarray import preprocess_and_wrap
+from scipy.fft import set_backend, fftfreq, fft2, ifft2
+import pyfftw
+
+# Enable the pyfftw cache for speed
+pyfftw.interfaces.cache.enable()
+# Set the backend for all subsequent fft calls
+set_backend(pyfftw.interfaces.scipy_fft)
 
 
 warnings.filterwarnings("ignore", message="Slicing is producing a large chunk.")
@@ -114,33 +120,35 @@ def assign_units_from_attrs(ds):
 
 
 def spectral_filter_2d(
-    data_array: xr.DataArray, high_pass_wl_km: float, low_pass_wl_km: float
+    data_array: xr.DataArray, high_pass_wl_km: float, low_pass_wl_km: float, axes=(-2, -1)
 ) -> xr.DataArray:
-    """Applies the 2D Gaussian low-pass filter, as in <<Schaffer et al 2024>>
-    This function is designed to isolate the synoptic-scale component of a field.
+    """
+    Applies the 2D Gaussian low-pass filter using a vectorized approach to handle
+    2D or 3D DataArrays efficiently. This function is designed to isolate the
+    synoptic-scale component of a field.
 
     Args:
-        data_array: The 2D (or 3D with pressure_level) xr.DataArray to filter.
-        high_pass_wl_km: The wavelength (in km) where the filter response starts to roll off from 1.
-                         Corresponds to the 'top' of the filter curve.
-        low_pass_wl_km: The wavelength (in km) that controls the steepness of the filter roll-off.
+        data_array: The 2D or 3D xr.DataArray to filter.
+        high_pass_wl_km: The wavelength (in km) where the filter response
+                         starts to roll off from 1.
+        low_pass_wl_km: The wavelength (in km) that controls the steepness
+                        of the filter roll-off.
+        axes: The dimensions over which to apply the 2D FFT, defaulting to
+              the last two dimensions.
     """
-    if (
-        data_array.ndim != 2
-        or "latitude" not in data_array.dims
-        or "longitude" not in data_array.dims
-    ):
+    if "latitude" not in data_array.dims or "longitude" not in data_array.dims:
         raise ValueError(
-            "Input must be a 2D DataArray with 'latitude' and 'longitude' dimensions."
+            "Input DataArray must have 'latitude' and 'longitude' dimensions."
         )
 
-    ny, nx = data_array.shape
+    # Use the specified axes to get the shape for the 2D grid
+    ny, nx = data_array.shape[axes[0]], data_array.shape[axes[1]]
     lat_dim, lon_dim = "latitude", "longitude"
 
     # Earth radius in meters
     R = 6371000.0
 
-    # Calculate grid spacing in meters
+    # Calculate grid spacing in meters from the data array's coordinates
     dlon_deg = np.abs(data_array[lon_dim].diff(dim=lon_dim).mean().item())
     dlat_deg = np.abs(data_array[lat_dim].diff(dim=lat_dim).mean().item())
     mean_lat_rad = np.deg2rad(data_array[lat_dim].mean().item())
@@ -160,72 +168,58 @@ def spectral_filter_2d(
     # Wavenumber corresponding to the start of the roll-off
     k_hp_m = (2 * np.pi) / HP_m
 
-    # The formula is F(k) = exp(-2 * ( (pi * LP / k_lp) * (k - k_hp) )**2) which simplifies
-    # to the below. Note: This formula is expressed in terms of wavenumber 'k'.
+    # Calculate the 2D filter mask based on wavenumber
     exponent = -2 * ((LP_m / 2.0) * (k_magnitude - k_hp_m)) ** 2
-
-    # The filter response is 1 for wavelengths longer than HP_m (i.e., k < k_hp_m)
-    # and follows the Gaussian curve for shorter wavelengths.
     filter_mask = np.where(k_magnitude < k_hp_m, 1.0, np.exp(exponent))
 
-    # Apply the filter using FFT
+    # Apply the filter using FFT along the specified axes
     nan_mask = data_array.isnull()
     filled_data = data_array.fillna(0).values
-    data_fft = fft2(filled_data)
-    filtered_fft = data_fft * filter_mask
-    filtered_data_values = np.real(ifft2(filtered_fft))
 
-    # Reconstruct the DataArray
+    # Perform FFT, apply the filter, and perform inverse FFT
+    # The 2D filter_mask is automatically broadcast to the shape of data_fft
+    data_fft = fft2(filled_data, axes=axes)
+    filtered_fft = data_fft * filter_mask
+    filtered_data_values = np.real(ifft2(filtered_fft, axes=axes))
+
+    # Reconstruct the DataArray, preserving original metadata
     filtered_da = xr.DataArray(
         filtered_data_values,
         coords=data_array.coords,
         dims=data_array.dims,
         attrs=data_array.attrs,
     )
+    # Re-apply the NaN mask to restore original missing values
     return filtered_da.where(~nan_mask)
 
 
 def perform_scale_separation_on_slice(ds_slice: xr.Dataset) -> xr.Dataset:
     """
-    Applies scale separation to a full 3D (pressure_level, lat, lon) dataset slice.
-    Returns the mesoscale perturbation field.
+    Applies scale separation to a full dataset slice using a vectorized approach.
+    Returns the mesoscale and synoptic datasets.
     """
     synoptic_ds_list = []
-    # Identify variables that could potentially be filtered
-    vars_to_check = [
-        v
-        for v, da in ds_slice.data_vars.items()
+    vars_to_filter = [
+        v for v, da in ds_slice.data_vars.items()
         if "latitude" in da.dims and "longitude" in da.dims
     ]
 
-    for var_name in vars_to_check:
+    for var_name in vars_to_filter:
         original_da = ds_slice[var_name]
+        is_3d = "pressure_level" in original_da.dims
 
-        # Case 1: Handle 3D data (with a 'pressure_level' dimension) by applying the filter per pressure_level
-        if "pressure_level" in original_da.dims and original_da.ndim == 3:
-            synoptic_levels = []
-            for pressure_level in original_da["pressure_level"]:
-                data_2d = original_da.sel(pressure_level=pressure_level)
-                synoptic_2d = spectral_filter_2d(
-                    data_2d, HIGH_PASS_WL_KM, LOW_PASS_WL_KM
-                )
-                synoptic_levels.append(synoptic_2d)
-            synoptic_da = xr.concat(synoptic_levels, dim="pressure_level")
-            synoptic_ds_list.append(synoptic_da.rename(var_name))
-
-        # Case 2: Handle 2D data (no 'pressure_level' dimension)
-        elif "pressure_level" not in original_da.dims and original_da.ndim == 2:
+        # This vectorized approach handles both 2D and 3D DataArrays
+        if original_da.ndim in [2, 3]:
+            # Apply the filter across the last two dimensions (lat, lon)
+            # This avoids the slow Python loop over pressure levels.
             synoptic_da = spectral_filter_2d(
-                original_da, HIGH_PASS_WL_KM, LOW_PASS_WL_KM
+                original_da, HIGH_PASS_WL_KM, LOW_PASS_WL_KM, axes=(-2, -1)
             )
             synoptic_ds_list.append(synoptic_da.rename(var_name))
-
-        # Case 3: Skip any other variables that have lat/lon dims but are not the expected 2D/3D structure
         else:
             logging.info(
                 f"Skipping filtering for variable '{var_name}' with unexpected dimensions: {original_da.dims}"
             )
-            continue
 
     if not synoptic_ds_list:
         logging.warning(
